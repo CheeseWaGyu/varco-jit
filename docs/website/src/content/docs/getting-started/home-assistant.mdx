@@ -65,7 +65,7 @@ The panel header also shows relay health, including the bridge URL, last connect
 
 ## Dashboard export and build
 
-The panel can harvest a Lovelace dashboard or view into a selected entity manifest. Use **Download agent brief zip** to export `brief.md` and `manifest.json` for a coding agent, or **Build share link** to mint a read-only claim link that opens a Varco-rendered dashboard approximation grouped from the harvested Lovelace cards. The consumer still gets only Varco grant scopes, never a Home Assistant token.
+The panel can harvest a Lovelace dashboard or view into a selected entity manifest. Use **Download agent brief zip** to export `brief.md` and `manifest.json` for a coding agent, or **Build share link** to mint a claim link that opens a Varco-rendered dashboard approximation grouped from the harvested Lovelace cards. Share links are read-only by default; control is included only for services the owner explicitly ticks per entity, and wildcard action scopes are rejected for share manifests (see [Share manifests](../../concepts/grants-and-scopes/#share-manifests)). The consumer still gets only Varco grant scopes, never a Home Assistant token.
 
 ## Next
 
