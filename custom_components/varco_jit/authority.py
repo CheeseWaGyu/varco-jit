@@ -11,7 +11,7 @@ from typing import Any, Callable
 from . import audit
 from .crypto import generate_consumer_keypair, new_id, pairing_code, verify_access_request, verify_authenticate
 from .jit import audit_failure, evaluate_jit_params, jit_restrictions
-from .manifest import ManifestError, reject_wildcard_share_actions, validate_manifest
+from .manifest import ManifestError, reject_wildcard_share_actions, validate_expires_at, validate_manifest
 from .models import AccessRequest, Grant, Share, hash_pin, utcnow
 from .policy import (
     camera_entities,
@@ -106,7 +106,9 @@ class VarcoAuthority:
         try:
             expires = datetime.fromisoformat(expires_at)
         except (TypeError, ValueError):
-            return False
+            # Fail closed: a stored expiry that cannot be parsed (legacy or
+            # corrupt data) must not grant perpetual access.
+            return True
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=timezone.utc)
         return self.now_provider() >= expires
@@ -149,6 +151,7 @@ class VarcoAuthority:
         return self._error(message.get("request_id"), "unknown_message", "Unknown message type")
 
     async def approve_request(self, request_id: str, expires_at: str | None = None, approved_manifest: dict | None = None) -> Grant:
+        validate_expires_at(expires_at)
         grant = await self.store.async_approve_request(request_id, expires_at=expires_at, approved_manifest=approved_manifest)
         await self._dismiss_notification(request_id)
         await audit.async_log(self.store, "access_request_approved", grant.grant_id)
@@ -157,6 +160,7 @@ class VarcoAuthority:
     async def create_preapproved_grant(self, manifest: dict[str, Any], expires_at: str | None = None, restrictions: list[dict[str, Any]] | None = None) -> tuple[Grant, dict[str, str]]:
         manifest = validate_manifest(manifest)
         reject_wildcard_share_actions(manifest)
+        validate_expires_at(expires_at)
         identity = generate_consumer_keypair()
         normalized_restrictions = [self._normalize_restriction(item) for item in restrictions or [] if isinstance(item, dict)]
         grant = await self.store.async_create_preapproved_grant(identity["public_key"], manifest, expires_at=expires_at, restrictions=normalized_restrictions)
@@ -166,6 +170,7 @@ class VarcoAuthority:
     async def create_share(self, name: str, manifest: dict[str, Any], max_claims: int = 1, expires_at: str | None = None, restrictions: list[dict[str, Any]] | None = None, note: str | None = None) -> tuple[Share, str]:
         manifest = validate_manifest(manifest)
         reject_wildcard_share_actions(manifest)
+        validate_expires_at(expires_at)
         secret = new_id(32)
         share = Share(
             share_id=new_id(16),
@@ -194,12 +199,30 @@ class VarcoAuthority:
     async def revoke_share(self, share_id: str) -> Share:
         share = await self.store.async_revoke_share(share_id)
         await audit.async_log(self.store, "share_revoked", share.share_id)
+        await self._revoke_grants_claimed_from_share(share.share_id, "share_revoked")
         return share
 
     async def delete_share(self, share_id: str) -> Share:
         share = await self.store.async_delete_share(share_id)
         await audit.async_log(self.store, "share_deleted", share.share_id)
+        await self._revoke_grants_claimed_from_share(share.share_id, "share_deleted")
         return share
+
+    async def _revoke_grants_claimed_from_share(self, share_id: str, source: str) -> None:
+        """Revoke every live grant minted by claiming ``share_id``.
+
+        Revoking or deleting a share must also end access that was already
+        claimed from it; otherwise claimed consumers would keep working
+        until their grant expired on its own. The revocation takes effect
+        for live sessions without touching session state here, because
+        ``_authenticate`` and ``_require_grant`` re-check ``grant.revoked``
+        on every message.
+        """
+        for grant in await self.store.async_list_grants():
+            if grant.share_id != share_id or grant.revoked:
+                continue
+            await self.store.async_revoke_grant(grant.grant_id)
+            await audit.async_log(self.store, "grant_revoked", grant.grant_id, {"source": source, "share_id": share_id})
 
     async def purge_expired_shares(self) -> list[str]:
         deleted = await self.store.async_purge_expired_shares()
