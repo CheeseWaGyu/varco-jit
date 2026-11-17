@@ -90,7 +90,11 @@ async def websocket_audit(hass: HomeAssistant, connection, msg) -> None:
 @websocket_api.require_admin
 @websocket_api.async_response
 async def websocket_approve(hass: HomeAssistant, connection, msg) -> None:
-    grant = await _authority(hass).approve_request(msg["request_id"], expires_at=msg.get("expires_at"), approved_manifest=msg.get("approved_manifest"))
+    try:
+        grant = await _authority(hass).approve_request(msg["request_id"], expires_at=msg.get("expires_at"), approved_manifest=msg.get("approved_manifest"))
+    except ManifestError as err:
+        connection.send_error(msg["id"], "invalid_manifest", str(err))
+        return
     connection.send_result(msg["id"], grant.as_dict())
 
 
