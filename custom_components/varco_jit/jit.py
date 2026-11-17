@@ -31,13 +31,20 @@ Fail-closed rules:
 - A missing entity fails every positive operator with reason
   ``entity_unavailable``. ``not_exists`` is the only operator that passes
   for a missing entity, and it passes *only* when the entity is truly
-  absent (lookup returns ``None``).
+  absent (lookup returns ``None`` without raising).
+- If ``state_lookup`` raises, the condition fails with reason
+  ``state_lookup_error`` for every operator, including ``not_exists``:
+  a lookup error is never treated as absence.
 - States ``unknown`` and ``unavailable`` fail every positive operator
   with reason ``entity_unavailable``. ``exists`` still passes: the entity
   exists, it just has no usable value.
-- Numeric operators fail with reason ``non_numeric`` when either side
-  does not parse as a number.
-- A malformed condition fails with reason ``invalid_condition``.
+- Numeric operators fail with reason ``non_numeric`` when the actual
+  value does not parse as a number. A non-numeric *expected* value for a
+  numeric operator is a configuration error (``invalid_condition``).
+- A malformed condition fails with reason ``invalid_condition``, and any
+  validation error in any condition denies the whole restriction
+  regardless of ``match`` — under ``match: "any"`` a broken condition
+  must not be silently skipped just because another condition passes.
 """
 from __future__ import annotations
 
@@ -146,6 +153,8 @@ def _validate_condition(condition: Any) -> list[str]:
         errors.append(f"value is required for operator {canonical}")
     if canonical in {"in", "not_in"} and "value" in condition and not isinstance(condition.get("value"), list):
         errors.append(f"value must be a list for operator {canonical}")
+    if canonical in _NUMERIC_OPERATORS and "value" in condition and _as_number(condition.get("value")) is None:
+        errors.append(f"value must be numeric for operator {canonical}")
     attribute = condition.get("attribute")
     if attribute is not None and not isinstance(attribute, str):
         errors.append("attribute must be a string")
@@ -182,7 +191,12 @@ def evaluate_jit_params(params: Any, state_lookup: StateLookup) -> JitDecision:
         )
     results = [_evaluate_condition(condition, state_lookup) for condition in conditions]
     errors = [f"conditions[{i}]: {error}" for i, condition in enumerate(conditions) for error in _validate_condition(condition)]
-    if match == "any":
+    if errors:
+        # Fail closed on configuration errors regardless of match: under
+        # "any", a malformed condition must not be skipped just because
+        # another condition happened to pass.
+        allowed = False
+    elif match == "any":
         allowed = any(result.passed for result in results)
     else:
         allowed = all(result.passed for result in results)
@@ -212,7 +226,12 @@ def _evaluate_condition(condition: Any, state_lookup: StateLookup) -> ConditionR
     try:
         payload = state_lookup(entity_id)
     except Exception:
-        payload = None
+        # A lookup error is not absence: fail closed for every operator,
+        # including not_exists, which may pass only on a clean None.
+        return ConditionResult(
+            entity_id, operator, False,
+            reason="state_lookup_error", attribute=attribute, expected=expected, actual=None,
+        )
 
     if operator == "not_exists":
         if payload is None:
