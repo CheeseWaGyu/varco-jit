@@ -38,10 +38,35 @@ test('dashboard share controls are opt-in per non-sensor entity', () => {
     ],
   };
   assert.deepEqual(panel.previewManifest(result).actions, []);
+  // The "allow controls" toggle alone grants nothing: control is granted
+  // only for services the owner explicitly ticks, as explicit scopes.
   panel.toggleActionEntity('switch.ev', true);
-  assert.deepEqual(panel.previewManifest(result).actions, ['switch.*@switch.ev']);
+  assert.deepEqual(panel.previewManifest(result).actions, []);
+  panel.toggleActionService('switch.ev', 'turn_on', true);
+  assert.deepEqual(panel.previewManifest(result).actions, ['switch.turn_on@switch.ev']);
+  panel.toggleActionService('switch.ev', 'turn_on', false);
+  assert.deepEqual(panel.previewManifest(result).actions, []);
+  panel.toggleActionService('switch.ev', 'turn_off', true);
+  assert.deepEqual(panel.previewManifest(result).actions, ['switch.turn_off@switch.ev']);
+  // Toggling controls off clears the entity's chosen services.
   panel.toggleActionEntity('switch.ev', false);
   assert.deepEqual(panel.previewManifest(result).actions, []);
+  panel.toggleActionEntity('switch.ev', true);
+  assert.deepEqual(panel.previewManifest(result).actions, []);
+});
+
+test('entity share manifest is read-only by default and never uses wildcards', () => {
+  const panel = new VarcoPanel();
+  const readOnly = panel.entityShareManifest('lock.front_door', 'Front door');
+  assert.deepEqual(readOnly.actions, []);
+  assert.deepEqual(readOnly.read_entities, ['lock.front_door']);
+  assert.deepEqual(readOnly.subscriptions, ['lock.front_door']);
+
+  const withControl = panel.entityShareManifest('switch.ev', 'EV charger', ['turn_on', 'turn_off']);
+  assert.deepEqual(withControl.actions, ['switch.turn_on@switch.ev', 'switch.turn_off@switch.ev']);
+  for (const manifest of [readOnly, withControl]) {
+    assert.ok(!JSON.stringify(manifest).includes('*'), 'share manifests must not contain wildcard scopes');
+  }
 });
 
 test('timelineItems synthesizes request/grant state, deduplicates created grants, and sorts newest first', () => {
