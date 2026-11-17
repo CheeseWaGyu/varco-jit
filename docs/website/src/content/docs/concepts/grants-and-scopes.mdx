@@ -58,6 +58,8 @@ Share links (`varco_jit/create_share`) and preapproved grants (`varco_jit/create
 - Shares are read-only by default. The panel's entity share and dashboard share flows grant no actions unless the owner explicitly ticks individual services.
 - Control is granted per service, as explicit scopes such as `lock.lock@lock.front_door` — one scope per ticked service.
 - Wildcard action scopes are rejected for share manifests. Any `actions` entry containing `*` (for example `lock.*@lock.front_door`, `*@lock.front_door`, or `lock.*`) fails validation with a `ManifestError`, surfaced by the admin WebSocket API as `invalid_manifest`.
+- Revoking or deleting a share also revokes every grant already claimed from it, so claimed consumers lose access immediately rather than at grant expiry. Each cascaded revocation is audit-logged as `grant_revoked` with details `source: share_revoked` (or `share_deleted`) and the `share_id`. Because the Authority re-checks the stored grant on every consumer message, the revocation takes effect on the claimed consumer's next message.
+- `expires_at` is validated wherever it is set — `varco_jit/create_share`, `varco_jit/create_preapproved_grant`, and `varco_jit/approve_request`. It must be `null` (no expiry) or an ISO 8601 datetime string; anything else is rejected with `invalid_manifest`. A stored expiry that cannot be parsed (for example legacy or corrupt data) is treated as already expired by the runtime expiry checks and by the storage purges: an unparseable expiry never means "never expires".
 
 The normal access-request approval flow is not affected: an owner may still deliberately approve wildcard action scopes there.
 
