@@ -200,9 +200,9 @@ def _evaluate_restriction(restriction: dict[str, Any], context: dict[str, Any], 
             return RestrictionDecision(False, restriction_id, "invalid_pin")
         return RestrictionDecision(True)
 
-    # Stateful rate limits and hass-bound template conditions are evaluated by
-    # VarcoAuthority after stateless checks.
-    if typ in {"rate_limit", "cooldown", "template"}:
+    # Stateful rate limits and hass-bound template/JIT conditions are
+    # evaluated by VarcoAuthority after stateless checks.
+    if typ in {"rate_limit", "cooldown", "template", "jit", "state_condition"}:
         return RestrictionDecision(True)
 
     return RestrictionDecision(False, restriction_id, "unknown_restriction_type")

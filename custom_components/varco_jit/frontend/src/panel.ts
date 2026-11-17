@@ -135,7 +135,7 @@ export class VarcoPanel extends HTMLElement {
       saveBtn.textContent = 'Saving…';
       const grant = this._lastState?.grants?.find((g) => g.grant_id === grantId);
       const existing = Array.isArray(grant?.restrictions) ? grant!.restrictions! : [];
-      await this._hass!.connection.sendMessagePromise({ type: 'varco/update_grant_restrictions', grant_id: grantId, restrictions: [...existing, newR] });
+      await this._hass!.connection.sendMessagePromise({ type: 'varco_jit/update_grant_restrictions', grant_id: grantId, restrictions: [...existing, newR] });
       this._loaded = false;
       await this.load();
     }
@@ -148,7 +148,7 @@ export class VarcoPanel extends HTMLElement {
     this._subscribePromise = subscribeMessage.call(this._hass.connection, async () => {
       this._loaded = false;
       await this.load();
-    }, { type: 'varco/subscribe' })
+    }, { type: 'varco_jit/subscribe' })
       .then((unsub) => { this._eventUnsub = unsub; })
       .catch(() => undefined)
       .finally(() => { this._subscribePromise = undefined; });
@@ -159,10 +159,10 @@ export class VarcoPanel extends HTMLElement {
     if (!this._hass) return;
     this._loaded = true;
     const [info, requests, grants, audit] = await Promise.all([
-      this._hass.connection.sendMessagePromise<VarcoInfo>({ type: 'varco/info' }),
-      this._hass.connection.sendMessagePromise<AccessRequest[]>({ type: 'varco/access_requests' }),
-      this._hass.connection.sendMessagePromise<Grant[]>({ type: 'varco/grants' }),
-      this._hass.connection.sendMessagePromise<AuditEvent[]>({ type: 'varco/audit' }).catch(() => [] as AuditEvent[]),
+      this._hass.connection.sendMessagePromise<VarcoInfo>({ type: 'varco_jit/info' }),
+      this._hass.connection.sendMessagePromise<AccessRequest[]>({ type: 'varco_jit/access_requests' }),
+      this._hass.connection.sendMessagePromise<Grant[]>({ type: 'varco_jit/grants' }),
+      this._hass.connection.sendMessagePromise<AuditEvent[]>({ type: 'varco_jit/audit' }).catch(() => [] as AuditEvent[]),
     ]);
     await this.loadDashboards();
     this.render({ info, requests, grants, audit });
@@ -561,6 +561,7 @@ export class VarcoPanel extends HTMLElement {
               <option value="pin">PIN — require a code to act</option>
               <option value="rate_limit">Rate limit — max N calls per window</option>
               <option value="template">Template — allow only when a HA template is true</option>
+              <option value="jit">JIT state condition — allow only when entity states match</option>
             </select>
             <div data-rf-fields="${this.escape(grantId)}"></div>
           </div>
@@ -580,6 +581,13 @@ export class VarcoPanel extends HTMLElement {
     if (type === 'pin') detail = 'PIN set';
     if (type === 'rate_limit') detail = `max ${this.escape(String(params.limit || '?'))} per ${this.escape(String(params.window_seconds || '?'))} s`;
     if (type === 'template') detail = this.escape(String(params.value_template || ''));
+    if (type === 'jit' || type === 'state_condition') {
+      const conds = Array.isArray(params.conditions) ? (params.conditions as Array<Record<string, unknown>>) : [];
+      const joiner = params.match === 'any' ? ' OR ' : ' AND ';
+      detail = conds.length
+        ? conds.map((c) => `${String(c.entity_id || '?')} ${String(c.operator || '?')} ${c.value === undefined ? '' : JSON.stringify(c.value)}`.trim()).join(joiner)
+        : 'no conditions';
+    }
     return `
       <div class="rest-row ${enabled ? '' : 'disabled'}">
         <div class="rest-main">
@@ -609,6 +617,7 @@ export class VarcoPanel extends HTMLElement {
     if (type === 'pin') return applies + `<label class="field">PIN <small class="muted">(set by you, never stored as plaintext)</small></label><input type="password" data-rf-pin placeholder="Enter PIN" autocomplete="new-password" style="max-width:280px">`;
     if (type === 'rate_limit') return applies + `<div class="chk-row" style="margin-top:10px"><label class="field" style="margin:0">Max calls <input type="number" data-rf-limit min="1" value="10" style="width:80px"></label><label class="field" style="margin:0">per <input type="number" data-rf-window min="1" value="3600" style="width:90px"> seconds</label></div>`;
     if (type === 'template') return applies + `<label class="field">Condition template <small class="muted">(Jinja2; falsy or error denies)</small></label><textarea data-rf-template rows="3" placeholder="{{ is_state('alarm_control_panel.home_alarm', 'disarmed') }}" style="${this.inputStyle};font-family:monospace"></textarea>`;
+    if (type === 'jit') return applies + `<label class="field">Conditions <small class="muted">(JSON array; each: entity_id, optional attribute, operator, value. Operators: is, is_not, in, not_in, above, below, gte, lte, exists, not_exists)</small></label><textarea data-rf-jit-conditions rows="4" placeholder='[{"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home"}]' style="${this.inputStyle};font-family:monospace"></textarea><label class="field">Match</label><select data-rf-jit-match style="${this.inputStyle}"><option value="all">all conditions must pass</option><option value="any">any condition may pass</option></select><label class="field" style="margin-top:10px"><input type="checkbox" data-rf-jit-reveal> Reveal actual state values to the consumer on denial <small class="muted">(off: actuals are only sent for entities the grant can already read)</small></label>`;
     return '';
   }
 
@@ -624,6 +633,10 @@ export class VarcoPanel extends HTMLElement {
     if (type === 'pin') return applies + `<label class="field">New PIN <small class="muted">(leave blank to keep current)</small></label><input type="password" data-re-pin placeholder="Leave blank to keep current" autocomplete="new-password" style="max-width:280px">`;
     if (type === 'rate_limit') return applies + `<div class="chk-row" style="margin-top:10px"><label class="field" style="margin:0">Max calls <input type="number" data-re-limit min="1" value="${this.escape(String(params.limit ?? 10))}" style="width:80px"></label><label class="field" style="margin:0">per <input type="number" data-re-window min="1" value="${this.escape(String(params.window_seconds ?? 3600))}" style="width:90px"> seconds</label></div>`;
     if (type === 'template') return applies + `<label class="field">Condition template</label><textarea data-re-template rows="3" style="${this.inputStyle};font-family:monospace">${this.escape(String(params.value_template || ''))}</textarea>`;
+    if (type === 'jit' || type === 'state_condition') {
+      const conditionsJson = JSON.stringify(Array.isArray(params.conditions) ? params.conditions : [], null, 2);
+      return applies + `<label class="field">Conditions <small class="muted">(JSON array)</small></label><textarea data-re-jit-conditions rows="4" style="${this.inputStyle};font-family:monospace">${this.escape(conditionsJson)}</textarea><label class="field">Match</label><select data-re-jit-match style="${this.inputStyle}"><option value="all" ${params.match !== 'any' ? 'selected' : ''}>all conditions must pass</option><option value="any" ${params.match === 'any' ? 'selected' : ''}>any condition may pass</option></select><label class="field" style="margin-top:10px"><input type="checkbox" data-re-jit-reveal ${params.reveal_actual ? 'checked' : ''}> Reveal actual state values to the consumer on denial</label>`;
+    }
     return applies;
   }
 
@@ -652,6 +665,14 @@ export class VarcoPanel extends HTMLElement {
       const valueTemplate = (editEl.querySelector<HTMLTextAreaElement>('[data-re-template]')?.value || '').trim();
       if (!valueTemplate) { this.showFieldError(editEl, 'Please enter a condition template.'); return null; }
       params.value_template = valueTemplate;
+    } else if (type === 'jit' || type === 'state_condition') {
+      const raw = (editEl.querySelector<HTMLTextAreaElement>('[data-re-jit-conditions]')?.value || '').trim();
+      let conditions: unknown;
+      try { conditions = JSON.parse(raw); } catch { this.showFieldError(editEl, 'Conditions must be valid JSON.'); return null; }
+      if (!Array.isArray(conditions) || !conditions.length) { this.showFieldError(editEl, 'Please enter at least one condition.'); return null; }
+      params.conditions = conditions;
+      params.match = editEl.querySelector<HTMLSelectElement>('[data-re-jit-match]')?.value || 'all';
+      params.reveal_actual = !!editEl.querySelector<HTMLInputElement>('[data-re-jit-reveal]')?.checked;
     }
     return { ...original, applies_to: appliesTo, params };
   }
@@ -689,6 +710,15 @@ export class VarcoPanel extends HTMLElement {
       if (!valueTemplate) { this.showFieldError(container, 'Please enter a condition template.'); return null; }
       return { id, type, enabled: true, applies_to: appliesTo, params: { value_template: valueTemplate } };
     }
+    if (type === 'jit') {
+      const raw = (container.querySelector<HTMLTextAreaElement>('[data-rf-jit-conditions]')?.value || '').trim();
+      let conditions: unknown;
+      try { conditions = JSON.parse(raw); } catch { this.showFieldError(container, 'Conditions must be valid JSON.'); return null; }
+      if (!Array.isArray(conditions) || !conditions.length) { this.showFieldError(container, 'Please enter at least one condition.'); return null; }
+      const match = container.querySelector<HTMLSelectElement>('[data-rf-jit-match]')?.value || 'all';
+      const revealActual = !!container.querySelector<HTMLInputElement>('[data-rf-jit-reveal]')?.checked;
+      return { id, type, enabled: true, applies_to: appliesTo, params: { conditions, match, reveal_actual: revealActual } };
+    }
     return null;
   }
 
@@ -723,6 +753,7 @@ export class VarcoPanel extends HTMLElement {
       permission_error: 'Permission denied',
       rate_limited: 'Rate limited',
       restriction_denied: 'Restriction denied',
+      jit_denied: 'JIT condition denied',
       history_query_limited: 'History query limited',
       session_error: 'Session error',
       share_created: 'Share created',
@@ -950,7 +981,7 @@ export class VarcoPanel extends HTMLElement {
     this.render(this._lastState!);
     try {
       const response = await this._hass!.connection.sendMessagePromise<{ share_url: string }>({
-        type: 'varco/create_share',
+        type: 'varco_jit/create_share',
         name,
         max_claims: maxClaims,
         manifest: this.entityShareManifest(entityId, name),
@@ -1135,7 +1166,7 @@ export class VarcoPanel extends HTMLElement {
   async requestDashboardExport(selectedEntities?: string[]): Promise<ExportResult> {
     const dashboard = this._selectedDashboardIndex !== undefined ? this._dashboards?.[this._selectedDashboardIndex] : undefined;
     const message: { type: string; [key: string]: unknown } = {
-      type: 'varco/dashboard_export',
+      type: 'varco_jit/dashboard_export',
       config: this._exportConfig,
       dashboard_title: dashboard?.title || 'Home Assistant dashboard',
       dashboard_url_path: dashboard?.url_path ?? null,
@@ -1197,7 +1228,7 @@ export class VarcoPanel extends HTMLElement {
     try {
       const name = this.exportShareName(this._exportResult);
       const response = await this._hass!.connection.sendMessagePromise<{ share_url: string }>({
-        type: 'varco/create_share',
+        type: 'varco_jit/create_share',
         name,
         max_claims: maxClaims,
         manifest: { ...this.previewManifest(this._exportResult), name, version: '0.1.0' },
@@ -1538,11 +1569,11 @@ export class VarcoPanel extends HTMLElement {
           payload.expires_at = new Date(Date.now() + Number(expiry.value)).toISOString();
         }
         const name = this._lastState?.requests.find((r) => r.request_id === requestId)?.manifest?.name || 'consumer';
-        void this.call('varco/approve_request', payload).then(() => this.flash(`Access granted to ${name}`, 'ok'));
+        void this.call('varco_jit/approve_request', payload).then(() => this.flash(`Access granted to ${name}`, 'ok'));
       };
     });
     this.querySelectorAll<HTMLElement>('[data-reject]').forEach((el) => {
-      el.onclick = () => void this.call('varco/reject_request', { request_id: el.dataset.reject! }).then(() => this.flash('Request rejected', 'danger'));
+      el.onclick = () => void this.call('varco_jit/reject_request', { request_id: el.dataset.reject! }).then(() => this.flash('Request rejected', 'danger'));
     });
 
     // revoke -> modal; delete -> inline confirm
@@ -1554,7 +1585,7 @@ export class VarcoPanel extends HTMLElement {
         kind: 'delete',
         message: `Delete grant record for ${el.dataset.name}? This also removes active access for that consumer.`,
         confirmLabel: 'Delete grant record',
-        onConfirm: () => void this.call('varco/delete_grant', { grant_id: el.dataset.deleteGrant! }).then(() => this.flash('Grant record deleted', 'warn')),
+        onConfirm: () => void this.call('varco_jit/delete_grant', { grant_id: el.dataset.deleteGrant! }).then(() => this.flash('Grant record deleted', 'warn')),
       });
     });
     // revoke modal actions
@@ -1566,7 +1597,7 @@ export class VarcoPanel extends HTMLElement {
     const revokeConfirm = this.querySelector<HTMLElement>('[data-revoke-confirm]');
     if (revokeConfirm && this._confirmRevoke) {
       const { grantId, name } = this._confirmRevoke;
-      revokeConfirm.onclick = () => { this._confirmRevoke = null; void this.call('varco/revoke_grant', { grant_id: grantId }).then(() => this.flash(`Access revoked for ${name}`, 'danger')); };
+      revokeConfirm.onclick = () => { this._confirmRevoke = null; void this.call('varco_jit/revoke_grant', { grant_id: grantId }).then(() => this.flash(`Access revoked for ${name}`, 'danger')); };
     }
 
     // add-restriction type selector
@@ -1593,7 +1624,7 @@ export class VarcoPanel extends HTMLElement {
         const grant = this._lastState?.grants?.find((g) => g.grant_id === grantId);
         const existing = Array.isArray(grant?.restrictions) ? grant!.restrictions! : [];
         const updated = existing.filter((_, i) => i !== idx);
-        await this._hass!.connection.sendMessagePromise({ type: 'varco/update_grant_restrictions', grant_id: grantId, restrictions: updated });
+        await this._hass!.connection.sendMessagePromise({ type: 'varco_jit/update_grant_restrictions', grant_id: grantId, restrictions: updated });
         this._loaded = false;
         await this.load();
       };
@@ -1609,7 +1640,7 @@ export class VarcoPanel extends HTMLElement {
         if (!existing[idx]) return;
         (btn as HTMLButtonElement).disabled = true;
         const updated = existing.map((item, i) => (i === idx ? { ...item, enabled: item.enabled === false } : item));
-        await this._hass!.connection.sendMessagePromise({ type: 'varco/update_grant_restrictions', grant_id: grantId, restrictions: updated });
+        await this._hass!.connection.sendMessagePromise({ type: 'varco_jit/update_grant_restrictions', grant_id: grantId, restrictions: updated });
         this._loaded = false;
         await this.load();
       };
@@ -1636,7 +1667,7 @@ export class VarcoPanel extends HTMLElement {
           const tgt = ev.currentTarget as HTMLButtonElement;
           tgt.disabled = true;
           tgt.textContent = 'Saving…';
-          await this._hass!.connection.sendMessagePromise({ type: 'varco/update_grant_restrictions', grant_id: grantId, restrictions: updated });
+          await this._hass!.connection.sendMessagePromise({ type: 'varco_jit/update_grant_restrictions', grant_id: grantId, restrictions: updated });
           this._loaded = false;
           await this.load();
         };
@@ -1799,4 +1830,4 @@ export class VarcoPanel extends HTMLElement {
   }
 }
 
-customElements.define('varco-panel', VarcoPanel);
+customElements.define('varco-jit-panel', VarcoPanel);

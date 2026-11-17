@@ -194,7 +194,7 @@ export class RelayTransport implements VarcoTransport {
       const pending = this.pending.get(requestId)!;
       this.pending.delete(requestId);
       clearTimeout(pending.timer);
-      if (payload.type === "error") pending.reject(Object.assign(new Error(payload.message), { code: payload.code }));
+      if (payload.type === "error") pending.reject(Object.assign(new Error(payload.message), { code: payload.code, ...(payload.jit ? { jit: payload.jit } : {}), ...(payload.details ? { details: payload.details } : {}) }));
       else pending.resolve(payload);
       return;
     }

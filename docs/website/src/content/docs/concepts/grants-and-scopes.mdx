@@ -76,7 +76,7 @@ all enabled matching restrictions allow the operation
 
 Restrictions are enforced by the Home Assistant Authority on every data-plane request. They never widen a manifest scope, and the bridge/consumer are not trusted to enforce them.
 
-Owners manage restrictions in the Varco panel from each grant card. The panel can add restrictions, toggle them enabled or disabled, edit their parameters in place, and remove them. All changes are persisted through `varco/update_grant_restrictions` and remain a narrowing layer on top of the stored grant.
+Owners manage restrictions in the Varco panel from each grant card. The panel can add restrictions, toggle them enabled or disabled, edit their parameters in place, and remove them. All changes are persisted through `varco_jit/update_grant_restrictions` and remain a narrowing layer on top of the stored grant.
 
 When an owner changes a grant's restrictions, the Authority clears active subscriptions for that grant and sends the consumer a `grant_restrictions_updated` error event. The consumer must create new subscriptions under the updated restrictions. Non-subscription requests continue on the same authenticated session, but are checked against the updated restrictions on the next request.
 
@@ -135,3 +135,27 @@ For service calls protected by a PIN, the consumer sends either a top-level `pin
 ```
 
 Denied restrictions are audited as `restriction_denied` with the restriction id and reason, without logging entity state, camera data, history payloads, or sensitive service data.
+
+### JIT state conditions (`jit`)
+
+Varco JIT adds a structured restriction type, `jit` (alias `state_condition`), whose `params.conditions` list single-entity comparisons (`entity_id`, optional `attribute`, `operator`, `value`) combined with `match: "all"` (default) or `"any"`. Operators are `is`, `is_not`, `in`, `not_in`, `above`, `below`, `gte`, `lte`, `exists`, and `not_exists`. Conditions are evaluated by the Authority just-in-time — fresh state read immediately before the operation, after template restrictions and before rate-limit accounting, so a JIT denial does not consume rate-limit budget. Missing entities, `unknown`/`unavailable` states, non-numeric values, and malformed conditions all fail closed.
+
+Unlike `template`, which denies with a generic `template_denied` reason, a JIT denial returns error code `jit_denied` with a structured `jit` payload listing each failed condition (entity, operator, expected value, reason). The actual state value is included only when `params.reveal_actual` is `true` or the condition entity is already readable under the grant; otherwise it is redacted. JIT denials are audited as `jit_denied` (not `restriction_denied`) with failures summarized without actual values. Example: allow the vacuum only while the owner is away:
+
+```json
+{
+  "id": "vacuum-only-when-away",
+  "enabled": true,
+  "type": "jit",
+  "applies_to": "vacuum.start@vacuum.robot",
+  "params": {
+    "conditions": [
+      {"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home"}
+    ],
+    "match": "all",
+    "reveal_actual": false
+  }
+}
+```
+
+See `JIT.md` in the repository root for the full specification.
