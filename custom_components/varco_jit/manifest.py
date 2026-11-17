@@ -6,6 +6,7 @@ deployed consumers, but the Authority stores only the canonical form.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import voluptuous as vol
@@ -75,6 +76,26 @@ def reject_wildcard_share_actions(manifest: dict[str, Any]) -> None:
                 "Share manifests cannot contain wildcard action scopes; "
                 "list explicit domain.service@entity_id actions"
             )
+
+
+def validate_expires_at(expires_at: Any) -> None:
+    """Reject an ``expires_at`` that is not a parseable ISO 8601 datetime.
+
+    ``None`` means "no expiry" and is allowed. Any other value must be a
+    string :func:`datetime.fromisoformat` can parse (a date-only string
+    such as ``"2026-01-01"`` is valid ISO 8601 and accepted). Anything
+    else raises :class:`ManifestError`, so a malformed expiry can never
+    be stored and silently treated as "never expires" by the expiry
+    checks, which fail closed on unparseable values.
+    """
+    if expires_at is None:
+        return
+    if not isinstance(expires_at, str):
+        raise ManifestError("expires_at must be an ISO 8601 datetime string")
+    try:
+        datetime.fromisoformat(expires_at)
+    except ValueError as err:
+        raise ManifestError("expires_at must be an ISO 8601 datetime string") from err
 
 
 def coerce_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
