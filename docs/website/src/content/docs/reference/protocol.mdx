@@ -1,0 +1,67 @@
+---
+title: Protocol messages
+description: Data-plane and control messages exchanged between Varco consumers and the Home Assistant Authority.
+---
+
+This page covers consumer-to-Authority messages, which travel end-to-end encrypted through the bridge. The plaintext Authority-to-bridge handshake (`challenge`/`auth`/`ready`, including the `proto` version field) is documented in [Bridge endpoints](../bridge-endpoints/).
+
+Messages handled by the Authority:
+
+<img src="/varco/assets/protocol-message-flow.png" alt="Diagram showing Varco protocol flow between consumer app, opaque bridge, and Home Assistant Authority" />
+
+| Message type | Request fields | Response | Scope checked |
+| --- | --- | --- | --- |
+| `access_request` | `consumer_pk`, `manifest`, `nonce`, `signature` | `access_request_pending` (`access_request_id`, `pairing_code`) | Signature only; creates pending request. |
+| `claim_share` | `share_id`, `secret`, `consumer_pk` | `share_claimed` (`grant_id`, `manifest`) | Claimable share exists, secret matches, and claims used is below `max_claims`; creates a grant for `consumer_pk`. |
+| `authenticate` | `consumer_pk`, `nonce`, `signature` | `authenticated` (`grant_id`, `manifest`) | Active grant for consumer key. The signature covers `varco-authenticate-v1\0` + `nonce` + `\0` + the session channel binding, so it cannot be replayed in another encrypted session. |
+| `grant_info` | none | `grant_info` (`grant_id`, `manifest`) | Authenticated session. Returns the stored manifest for generic clients that were not built with a manifest at development time. |
+| `get_states` | `entity_ids` | `states` | `read_entities`. |
+| `subscribe_states` | `entity_ids` | `state_snapshot`, then `state_delta` events | `subscriptions` plus `read_entities`. |
+| `unsubscribe_states` | `subscription_id` | `unsubscribed` | Authenticated session. |
+| `history_query` | `entity_ids` (max 10), optional `start_time`/`end_time` (range clamped to 30 days) | `history_result` (`history`, `truncated`, `range_clamped`; max 5000 points per entity) | `history`. |
+| `camera_snapshot` | `entity_id` | `camera_snapshot` | `camera_snapshots`. |
+| `call_service` | `domain`, `service`, `service_data`, `target`; optional top-level `pin` or `pins` | `{ type: "service_called", request_id, ok: true }` | `actions`. |
+| `webrtc_offer` | SDP offer | `webrtc_answer` or `webrtc_unavailable` | Active grant. |
+| `webrtc_ice` | ICE data | `webrtc_ice_ack` or `webrtc_unavailable` | Active grant. |
+
+Errors use:
+
+```json
+{
+  "type": "error",
+  "request_id": "optional request id",
+  "code": "permission_denied",
+  "message": "Entity not allowed"
+}
+```
+
+## Data-plane rate limits
+
+The Authority enforces an in-memory per-consumer rate budget on all authenticated data-plane operations (default 240 weight units per 60 seconds). Each operation costs 1 unit, except `history_query` and `camera_snapshot` (5 units) and `call_service` (2 units). Requests over budget return an error with `code: "rate_limited"` and are audited as `rate_limited` without sensitive payloads.
+
+## Restriction-aware requests
+
+Approved grants may include owner-managed restrictions. These are evaluated only by the Home Assistant Authority, after the normal grant scope check, in declaration order (fail-fast).
+
+For PIN-protected operations, include `pin` (single PIN) or `pins` (object keyed by restriction id) at the **top level** of the request, not inside `service_data`:
+
+```json
+{
+  "type": "call_service",
+  "domain": "lock",
+  "service": "unlock",
+  "target": { "entity_id": "lock.front_door" },
+  "pin": "1234"
+}
+```
+
+The Authority denies the request if the matching restriction is expired, outside schedule, rate-limited, missing a required PIN, or has an invalid PIN. Restriction failures return `permission_denied` and are audited as `restriction_denied`.
+
+All responses echo the `request_id` from the originating request.
+
+### Subscription responses
+
+`subscribe_states` returns two distinct message types:
+
+- `state_snapshot`: sent once on subscription with the full current states for all requested entities.
+- `state_delta`: sent on each Home Assistant state change; contains only the changed entities and the `subscription_id`.

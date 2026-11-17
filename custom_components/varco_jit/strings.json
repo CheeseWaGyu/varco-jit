@@ -1,0 +1,36 @@
+{
+  "title": "Varco JIT",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Varco JIT Authority",
+        "data": {
+          "bridge_ws_url": "Bridge WebSocket URL",
+          "webrtc_enabled": "Enable WebRTC"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Varco JIT",
+        "data": {
+          "bridge_ws_url": "Bridge WebSocket URL",
+          "webrtc_enabled": "Enable WebRTC"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Only one Varco JIT Authority can be configured.",
+      "reconfigure_successful": "Varco JIT configuration updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Varco JIT options",
+        "data": {
+          "bridge_ws_url": "Bridge WebSocket URL",
+          "webrtc_enabled": "Enable WebRTC"
+        }
+      }
+    }
+  }
+}

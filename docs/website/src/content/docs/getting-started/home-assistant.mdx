@@ -1,0 +1,74 @@
+---
+title: Home Assistant quickstart
+description: Install Varco, find your Authority ID, and approve a consumer.
+---
+
+This path is for the Home Assistant owner.
+
+## Install
+
+1. Copy `custom_components/varco` into your Home Assistant config directory:
+
+   ```text
+   config/custom_components/varco
+   ```
+
+2. Restart Home Assistant.
+3. Go to **Settings -> Devices & services -> Add integration**.
+4. Search for **Varco** and add it.
+5. Keep the default bridge URL unless you operate another bridge:
+
+   ```text
+   wss://varco-bridge.andreabaccega.com
+   ```
+
+6. Leave **Enable WebRTC** on unless you want relay-only transport. This Authority-side `webrtc_enabled` switch is distinct from the consumer-side `connectionStrategy` client option.
+
+Only one Varco Authority can be configured in a Home Assistant instance. Varco can also be installed through HACS as a custom repository or configured via YAML; see [Install Home Assistant](../../guides/install-home-assistant/).
+
+:::caution[After updates]
+After every Varco update, restart Home Assistant and hard-refresh `/varco`. Home Assistant keeps the old Python integration and panel JavaScript in memory until restart/browser refresh.
+:::
+
+## Find the Authority ID
+
+Open the **Varco** sidebar panel or browse to:
+
+```text
+/varco
+```
+
+Copy the **Authority ID**. Consumer apps need this public identifier to request access.
+
+## Approve a consumer
+
+1. Paste the Authority ID into the consumer app.
+2. The consumer sends an access request with its manifest.
+3. Home Assistant shows the pending request in the Varco panel.
+4. Compare the pairing code shown by the consumer with the code shown in Home Assistant.
+5. Review the requested permissions.
+6. Click **Approve** or **Reject**.
+
+You can untick individual permissions in the request card before approving. The grant then contains only the selected subset of the requested manifest; the Authority never widens a request.
+
+## Manage grants
+The **Grants** section of the Varco panel shows each grant's status, including active, revoked, and expired grants. Use the search box and status filter when you have many consumers.
+
+From each grant card you can:
+
+- **Review activity** — open the per-grant Activity section to see recent audit events for that grant. The panel shows event type, time, and safe metadata only; it does not show entity states, camera snapshots, or history payloads.
+- **Revoke access** — marks the grant revoked after an inline confirmation. Active sessions are marked closed and the consumer's next message is rejected with `grant_revoked`; the consumer cannot re-authenticate.
+- **Delete grant record** — removes the grant permanently after an inline confirmation, including its audit history.
+- **Manage restrictions** — add, remove, enable/disable, or edit restrictions in place. Supported restriction types: expiry, schedule, PIN, rate-limit, and template. See [Grants and scopes](../../concepts/grants-and-scopes/) for details.
+
+The panel header also shows relay health, including the bridge URL, last connected time, last error, and guidance when the relay is disconnected.
+
+## Dashboard export and build
+
+The panel can harvest a Lovelace dashboard or view into a selected entity manifest. Use **Download agent brief zip** to export `brief.md` and `manifest.json` for a coding agent, or **Build share link** to mint a read-only claim link that opens a Varco-rendered dashboard approximation grouped from the harvested Lovelace cards. The consumer still gets only Varco grant scopes, never a Home Assistant token.
+
+## Next
+
+- [Install Home Assistant](../../guides/install-home-assistant/) has the full installation guide.
+- [Pair a consumer](../../guides/pair-consumer/) explains the approval flow.
+- [Troubleshooting](../../guides/troubleshooting/) covers common relay and panel issues.

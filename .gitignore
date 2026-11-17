@@ -1,0 +1,13 @@
+*.py[cod]
+.env
+.pi/
+.pytest_cache/
+__pycache__/
+dist/
+node_modules/
+.wrangler/
+examples/gazzetta-energy-showcase/src/generated-demo-grant.ts
+examples/guest-stay-showcase/src/generated-demo-grant.ts
+.astro/
+bridge/src/varco-client-bundle.ts
+bridge/src/version.ts

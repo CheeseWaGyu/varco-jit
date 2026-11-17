@@ -1,0 +1,80 @@
+---
+title: Install Home Assistant
+description: Manual installation and setup for the Varco custom integration.
+---
+
+## Requirements
+
+- A Home Assistant installation where you can install a custom integration.
+- Outbound HTTPS/WebSocket access from Home Assistant to the bridge.
+- The `custom_components/varco` directory from this repository, or HACS configured with this repository as a custom integration.
+
+## HACS install (custom repository)
+
+Varco is not in the HACS default store. Install it as a custom repository:
+
+1. In HACS, open **Custom repositories**.
+2. Add `https://github.com/vekexasia/varco` with type **Integration**.
+3. Install **Varco** from HACS.
+4. Restart Home Assistant.
+5. Continue from step 3 of the manual install below to add the integration.
+
+HACS default-store inclusion is future work. Until then, use the custom repository URL above. Release artifacts also include `varco-home-assistant.zip` for manual installs.
+
+:::caution[Updating Varco]
+After every HACS or manual Varco update, restart Home Assistant and hard-refresh `/varco`. Without restart, Home Assistant continues running the previously loaded Python integration; without hard refresh, the browser may keep the old panel bundle.
+:::
+
+## Manual install
+
+1. Copy the integration into your Home Assistant config directory:
+
+   ```text
+   config/custom_components/varco
+   ```
+
+   The final path should contain files such as:
+
+   ```text
+   config/custom_components/varco/manifest.json
+   config/custom_components/varco/__init__.py
+   config/custom_components/varco/frontend/panel.js
+   ```
+
+2. Restart Home Assistant.
+3. Open **Settings -> Devices & services -> Add integration**.
+4. Search for **Varco** and add it.
+5. Keep the default bridge unless you operate a different bridge:
+
+   ```text
+   wss://varco-bridge.andreabaccega.com
+   ```
+
+6. Leave **Enable WebRTC** on unless you want to force relay-only transport. This is the Authority-side switch (`webrtc_enabled`); it is distinct from the consumer-side `connectionStrategy` client option. Relay transport keeps working either way.
+7. Submit the config flow.
+
+Only one Varco Authority can be configured in a Home Assistant instance.
+
+## YAML configuration
+
+As an alternative to the UI flow, Varco can be configured from `configuration.yaml`:
+
+```yaml
+varco:
+  bridge_ws_url: wss://varco-bridge.andreabaccega.com
+  webrtc_enabled: true
+```
+
+Both keys are optional and default to the values shown. The YAML block is ignored when a UI config entry already exists.
+
+The Authority key pair is stored in Varco's integration storage and is generated only on first start, so the Authority ID and existing pairings survive restarts and reinstalls for both YAML and UI setups.
+
+## Open the panel
+
+After setup, open the **Varco** sidebar panel or browse directly to:
+
+```text
+/varco
+```
+
+The panel shows the Authority ID, relay status, pending requests, and existing grants.

@@ -1,0 +1,64 @@
+---
+title: Troubleshooting
+description: Common Varco installation, relay, pairing, and WebRTC issues.
+---
+
+## The Varco panel does not appear
+
+- Confirm the integration directory is at `config/custom_components/varco`.
+- Restart Home Assistant after copying the integration.
+- Confirm the integration was added from **Settings -> Devices & services**.
+
+## Relay is disconnected
+
+- Confirm Home Assistant can make outbound WebSocket connections.
+- Confirm the configured bridge URL starts with `wss://`.
+- Confirm no second Home Assistant instance is using the same Authority ID. The bridge keeps only the most recently authenticated Authority connection for an ID, so two instances will keep replacing each other.
+- Check Home Assistant logs for `Varco relay disconnected`.
+- A persistent `404` or `500` in the log usually means the configured bridge URL points at a dead or moved bridge host. These are connection errors, not bridge close codes, so the relay keeps retrying on its normal 1-60s backoff; fix the URL (see below) instead of waiting it out. For repeated close codes 4401/4403/4406 the relay pauses itself; see [Notification: "Varco relay paused"](#notification-varco-relay-paused).
+
+## Changing the bridge URL on an existing install
+
+How to change the bridge URL depends on how the integration was set up:
+
+- **UI setup** (Settings -> Devices & services): open the Varco integration, press **Configure** (or use the entry's **Reconfigure** menu action), change the **Bridge WebSocket URL**, and save. The integration reloads and the relay reconnects to the new bridge immediately.
+- **YAML setup** (`varco:` in `configuration.yaml`): edit `bridge_ws_url` and restart Home Assistant.
+
+The Authority keypair lives in Varco's own storage (`config/.storage/varco.storage`), not in the config entry, so changing the bridge URL, removing and re-adding the integration, or switching between YAML and UI setup keeps the Authority ID and all existing grants.
+
+## Bridge closes the connection with code 4403 (`Authority not allowlisted`)
+
+The bridge runs with `AUTHORITY_ALLOWLIST` set and your Authority ID is not in the list. Ask the bridge operator to add the exact base64url Authority ID shown in the Varco panel, or point the integration at a different bridge.
+
+## Notification: "Varco relay paused"
+
+The relay (`custom_components/varco/relay.py`) hit a deterministic rejection: a repeated close code 4401 or 4403, or a protocol version mismatch (close code 4406). Retrying cannot succeed, so the relay pauses and retries once per hour instead of reconnecting on the normal backoff.
+
+- For 4403, check the allowlist case above, or look for a second instance using the same Authority ID.
+- For 4406 or a protocol version message, update the Varco integration to the latest version.
+- After fixing the cause, reload the Varco integration to reconnect immediately. The notification is dismissed automatically on the next successful connection.
+
+## Bridge closes the connection with code 4405 (`Relay data disabled`)
+
+The bridge runs with `BRIDGE_MODE=signaling-only`: it relays session setup and WebRTC negotiation but refuses application data. Consumers see `Bridge is signaling-only: P2P required but unavailable` when the WebRTC upgrade fails, and Home Assistant logs `Bridge is signaling-only: relay data disabled`.
+
+- Confirm WebRTC works: do not disable the upgrade (`connectionStrategy: "relay"`), and check Home Assistant logs for `aiortc` warnings.
+- If WebRTC cannot work in your network, use a bridge running the default `BRIDGE_MODE=relay`.
+
+## Consumer says the Authority is offline
+
+- Confirm the Varco panel says the relay is connected.
+- Confirm the consumer Authority ID exactly matches the panel value.
+- Check bridge presence in a browser:
+
+  ```text
+  https://varco-bridge.andreabaccega.com/presence/AUTHORITY_ID
+  ```
+
+## WebRTC does not connect
+
+WebRTC is opportunistic. Relay transport should continue working even when WebRTC is unavailable.
+
+- Confirm the consumer works on relay only (`connectionStrategy: "relay"`, or omit `connectionStrategy` so it falls back to relay).
+- Check Home Assistant logs for `aiortc` import or setup warnings.
+- Treat relay as the baseline transport while debugging WebRTC.

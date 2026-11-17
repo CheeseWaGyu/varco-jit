@@ -1,0 +1,124 @@
+---
+title: Client API
+description: Public @varco/client entry points and common operations.
+---
+
+Install it from npm:
+
+```bash
+npm install @varco/client
+```
+
+## `createVarcoConsumerClient()`
+
+Use `createVarcoConsumerClient()` when the same dashboard or consumer app should run both inside Home Assistant and outside Home Assistant.
+
+### Local Home Assistant mode
+
+Inside a Home Assistant custom card or panel, pass the explicit frontend `hass` object:
+
+```ts
+import { createVarcoConsumerClient } from "@varco/client";
+
+const client = createVarcoConsumerClient({ hass });
+```
+
+Local mode uses the already-authenticated frontend session. `requestAccess()` returns an already-approved local result and `connect()` is a no-op.
+
+Custom cards receive a new `hass` object on each frontend update. Forward it to the client so local subscriptions can emit `state_delta` events:
+
+```ts
+client.updateHass(nextHass);
+```
+
+### Relay mode
+
+Outside Home Assistant, use relay options:
+
+```ts
+import { createVarcoConsumerClient, VarcoConnectionStrategy } from "@varco/client";
+
+const client = createVarcoConsumerClient({
+  authorityId: "PASTE_AUTHORITY_ID_FROM_HOME_ASSISTANT",
+  bridgeUrl: "wss://varco-bridge.andreabaccega.com",
+  manifest,
+  connectionStrategy: VarcoConnectionStrategy.WebrtcFirst,
+});
+```
+
+Mode selection is explicit: if `hass` is passed, local Home Assistant mode wins even when relay options are also present. If `hass` is not passed, the client uses the relay path and optional WebRTC upgrade.
+
+### Connection strategy
+
+`connectionStrategy` is the `VarcoConnectionStrategy` enum and controls how the relay client establishes its data plane:
+
+| Strategy | Behavior |
+| --- | --- |
+| `VarcoConnectionStrategy.Relay` (`"relay"`) | Stay on the relay. Never attempt a P2P upgrade. |
+| `VarcoConnectionStrategy.WebrtcFirst` (`"webrtc-first"`, default) | `connect()` awaits the WebRTC upgrade and falls back to relay if it fails. |
+| `VarcoConnectionStrategy.WebrtcOnly` (`"webrtc-only"`) | Require a P2P data channel. `connect()` throws if the upgrade fails, with no relay data fallback. |
+| `VarcoConnectionStrategy.Optimistic` (`"optimistic"`) | `connect()` resolves on the relay immediately. The WebRTC upgrade runs in the background and swaps in when ready, so data calls start without waiting for P2P negotiation. |
+
+## `createVarcoClient()`
+
+Use `createVarcoClient()` when you specifically want the low-level relay client.
+
+```ts
+import { createVarcoClient } from "@varco/client";
+
+const client = createVarcoClient({
+  authorityId: "PASTE_AUTHORITY_ID_FROM_HOME_ASSISTANT",
+  bridgeUrl: "wss://varco-bridge.andreabaccega.com",
+  manifest,
+  warn: console.warn,
+  onTransportStatus: (status) => {
+    console.log(status.mode, status.detail);
+  },
+});
+```
+
+By default the relay client creates a non-extractable WebCrypto Ed25519 key pair and persists it in IndexedDB, so the private key cannot be read by page scripts. If WebCrypto Ed25519 is unavailable, or a custom `storage` option is provided, the identity falls back to JSON in that storage (`localStorage` legacy identities keep working). Clearing browser storage creates a new consumer identity and requires pairing again.
+
+## Main methods
+
+| Method | Purpose |
+| --- | --- |
+| `requestAccess()` | Send the manifest for owner approval and return the pairing code. |
+| `connect()` | Authenticate the stored consumer key against the approved grant. |
+| `getStates(entityIds)` | Read current state for approved entities. |
+| `subscribeEntities(entityIds, callback)` | Receive initial state and live state updates. |
+| `unsubscribe(subscriptionId)` | Remove a runtime subscription. |
+| `queryHistory(entityIds, range)` | Query Home Assistant recorder history. |
+| `cameraSnapshot(entityId)` | Request a camera snapshot. |
+| `callService(domain, service, data)` | Call an approved Home Assistant service. |
+
+## Domain helpers
+
+`@varco/client` stays headless. It does not render UI, but clients expose convenience helpers that call approved Home Assistant services with the right domain, service name, and payload shape.
+
+```ts
+await client.light.setBrightness("light.kitchen", 50);
+await client.climate.setTemperature("climate.living_room", 21, { hvac_mode: "heat" });
+await client.climate.setTemperatureRange("climate.bedroom", 18, 22, { hvac_mode: "heat_cool" });
+await client.cover.open("cover.awning");
+await client.mediaPlayer.setVolume("media_player.tv", 0.3);
+```
+
+The generic `callService()` method remains available for unsupported services and cross-domain services. `entity.call(entityId, service, data)` is only for services in the entity's own domain because it derives the domain from the entity ID.
+
+`climate.setTemperature()` is for a single setpoint and sends `temperature`. Use `climate.setTemperatureRange()` for heat/cool ranges with `target_temp_low` and `target_temp_high`.
+
+First-batch helper groups:
+
+- `entity`: `get`, `subscribe`, `history`, `call`.
+- `light`: `turnOn`, `turnOff`, `toggle`, `setBrightness`, `setColor`.
+- `switch`: `turnOn`, `turnOff`, `toggle`.
+- `climate`: `setTemperature`, `setTemperatureRange`, `setHvacMode`, `setPresetMode`, `setFanMode`, `setSwingMode`, `setHumidity`, `turnOn`, `turnOff`.
+- `cover`: `open`, `close`, `stop`, `setPosition`, `openTilt`, `closeTilt`, `stopTilt`, `setTiltPosition`.
+- `fan`: `turnOn`, `turnOff`, `toggle`, `setPercentage`, `setPresetMode`, `setDirection`, `oscillate`.
+- `lock`: `lock`, `unlock`, `open`.
+- `mediaPlayer`: `turnOn`, `turnOff`, `volumeUp`, `volumeDown`, `setVolume`, `mute`, `play`, `pause`, `stop`, `playPause`, `nextTrack`, `previousTrack`, `seek`, `selectSource`, `playMedia`.
+- `button`: `press`.
+- `scene`: `turnOn`.
+- `number`: `setValue`.
+- `select`: `selectOption`.

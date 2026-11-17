@@ -1,0 +1,189 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+env:
+  # Home Assistant 2026.6.1, pinned by multi-arch index digest for reproducible CI.
+  HA_IMAGE: ghcr.io/home-assistant/home-assistant:2026.6.1@sha256:59aa8824955c9db491b75d2eebe42bd68494f80c2ec69ec0d66d9dae37d37514
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install Python test dependencies
+        run: python -m pip install -r requirements-ci.txt
+
+      - name: Run unit and integration tests
+        run: npm test
+
+      - name: Run type checks
+        run: npm run check
+
+      - name: Check protocol version consistency
+        run: npm run check:protocol-version
+
+      - name: Verify the Varco panel bundle is in sync with its TypeScript source
+        run: |
+          npm --workspace custom_components/varco/frontend run build
+          if ! git diff --quiet -- custom_components/varco/frontend/panel.js; then
+            echo 'panel.js is out of sync with src/. Run: npm --workspace custom_components/varco/frontend run build' >&2
+            git --no-pager diff -- custom_components/varco/frontend/panel.js | head -40
+            exit 1
+          fi
+
+      - name: Build docs
+        run: npm run docs:build
+
+      - name: Build local Home Assistant dashboard assets
+        run: npm run dev:ha:local-assets
+
+      - name: Prepare Home Assistant e2e config
+        run: |
+          set -euo pipefail
+          docker pull "$HA_IMAGE"
+          rm -rf .pi/ci-ha-config
+          mkdir -p .pi/ci-ha-config/.storage .pi/ci-ha-config/custom_components
+          cp dev/home-assistant/config/configuration.yaml .pi/ci-ha-config/configuration.yaml
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('.pi/ci-ha-config/configuration.yaml')
+          text = path.read_text()
+          text = text.replace('webrtc_enabled: true', 'webrtc_enabled: false')
+          text = text.replace('bridge_ws_url: wss://varco-bridge.andreabaccega.com', 'bridge_ws_url: ' + 'ws:' + '//host.docker.internal:8787')
+          path.write_text(text)
+          PY
+          cp -a custom_components/varco .pi/ci-ha-config/custom_components/
+          cp -a dev/home-assistant/config/dashboards .pi/ci-ha-config/
+          cp -a dev/home-assistant/config/packages .pi/ci-ha-config/
+          cp -a dev/home-assistant/config/www .pi/ci-ha-config/
+          cat > .pi/ci-ha-config/.storage/onboarding <<'JSON'
+          {
+            "version": 4,
+            "minor_version": 1,
+            "key": "onboarding",
+            "data": {
+              "done": ["user", "core_config", "analytics", "integration"]
+            }
+          }
+          JSON
+          docker run --rm \
+            -u "$(id -u):$(id -g)" \
+            -v "$PWD/.pi/ci-ha-config:/config" \
+            "$HA_IMAGE" \
+            python -m homeassistant --script auth -c /config add test test
+
+      - name: Start Node bridge for relay e2e
+        run: |
+          set -euo pipefail
+          npm --workspace bridge run build
+          BRIDGE_HOST=127.0.0.1
+          HOST=0.0.0.0 PORT=8787 npm --workspace bridge run start:node > .pi/node-bridge.log 2>&1 &
+          echo $! > .pi/node-bridge.pid
+          for attempt in $(seq 1 30); do
+            if curl -fsS "http://$BRIDGE_HOST:8787/health" >/dev/null; then
+              exit 0
+            fi
+            echo "Node bridge not ready yet ($attempt/30)."
+            cat .pi/node-bridge.log || true
+            sleep 2
+          done
+          cat .pi/node-bridge.log || true
+          exit 1
+
+      - name: Start local Home Assistant
+        run: |
+          set -euo pipefail
+          docker run -d \
+            --name varco-ci-ha \
+            -p 8123:8123 \
+            --add-host=host.docker.internal:host-gateway \
+            -v "$PWD/.pi/ci-ha-config:/config" \
+            "$HA_IMAGE"
+
+      - name: Wait for Home Assistant e2e readiness
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          HA_HOST=127.0.0.1
+          for attempt in $(seq 1 48); do
+            if curl -fsS "http://$HA_HOST:8123/" >/dev/null \
+              && timeout -k 5s 20s npm run dev:ha:list; then
+              exit 0
+            fi
+            echo "Home Assistant not ready yet ($attempt/48)."
+            docker logs --tail 120 varco-ci-ha || true
+            sleep 5
+          done
+          docker logs varco-ci-ha
+          exit 1
+
+      - name: Run relay smoke e2e through Node bridge
+        timeout-minutes: 4
+        run: BRIDGE_HOST=127.0.0.1; timeout -k 10s 180s env VARCO_BRIDGE_URL="ws://$BRIDGE_HOST:8787" npm run dev:ha:smoke
+
+      - name: Run hass-first local smoke e2e
+        timeout-minutes: 4
+        run: timeout -k 10s 180s npm run dev:ha:local-smoke
+
+      - name: Run hass-first browser e2e
+        timeout-minutes: 5
+        run: timeout -k 10s 240s npm run dev:ha:local-browser
+
+      - name: Run dashboard export browser e2e
+        timeout-minutes: 5
+        run: timeout -k 10s 240s npm run dev:ha:dashboard-export-browser
+
+      - name: Run Authority panel browser e2e
+        timeout-minutes: 5
+        run: BRIDGE_HOST=127.0.0.1; timeout -k 10s 240s env VARCO_BRIDGE_URL="ws://$BRIDGE_HOST:8787" npm run dev:ha:panel-browser
+
+      - name: Run restrictions smoke e2e
+        timeout-minutes: 5
+        run: BRIDGE_HOST=127.0.0.1; timeout -k 10s 240s env VARCO_BRIDGE_URL="ws://$BRIDGE_HOST:8787" npm run dev:ha:restrictions-smoke
+
+      - name: Upload Home Assistant browser e2e artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: home-assistant-browser-e2e
+          path: |
+            .pi/varco-local-hass-e2e.png
+            .pi/varco-dashboard-export-e2e.png
+            .pi/varco-dashboard-export-e2e.zip
+            .pi/node-bridge.log
+          if-no-files-found: ignore
+
+      - name: Stop local Home Assistant
+        if: always()
+        run: |
+          docker rm -f varco-ci-ha || true
+          if [ -f .pi/node-bridge.pid ]; then kill "$(cat .pi/node-bridge.pid)" || true; fi

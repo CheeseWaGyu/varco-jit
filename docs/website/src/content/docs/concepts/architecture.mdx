@@ -1,0 +1,79 @@
+---
+title: Architecture
+description: Varco actors and data flow.
+---
+
+import Mermaid from "../../../components/Mermaid.astro";
+
+export const architectureFlow = `
+flowchart LR
+  Consumer["Consumer app<br/>browser client"]
+  Bridge["Opaque bridge<br/>Cloudflare Worker or Node"]
+  Authority["Home Assistant<br/>Varco Authority"]
+  Owner["Owner<br/>Varco panel"]
+  Grant[("Grant storage<br/>consumer public key + manifest + restrictions")]
+  HA["Home Assistant APIs<br/>entities · history · camera · services · audit"]
+
+  Authority -- "1 outbound WebSocket" --> Bridge
+  Consumer -- "2 connect with Authority ID" --> Bridge
+  Consumer -- "3 access_request<br/>manifest + signature" --> Bridge
+  Bridge -- "encrypted envelope" --> Authority
+  Authority -- "4 pending request" --> Owner
+  Owner -- "approve / reject" --> Authority
+  Authority -- "5 approved grant" --> Grant
+
+  Consumer -- "6 authenticate later sessions" --> Bridge
+  Bridge -- "relay data-plane fallback" --> Authority
+  Consumer -. "optional direct / WebRTC<br/>data channel when available" .-> Authority
+
+  Authority -- "7 check stored grant<br/>scope + restrictions" --> Grant
+  Authority -- "8 execute allowed operation" --> HA
+  Authority -- "9 response / state_delta" --> Bridge
+  Bridge -- "encrypted envelope" --> Consumer
+
+  classDef actor fill:#ffffff,stroke:#0b2a44,stroke-width:2px,color:#0b2a44;
+  classDef bridge fill:#e7f8f6,stroke:#009aa6,stroke-width:2px,color:#0b2a44;
+  classDef store fill:#f7fffd,stroke:#0b2a44,stroke-width:2px,color:#0b2a44;
+  classDef ha fill:#f7fffd,stroke:#0b2a44,stroke-width:2px,color:#0b2a44;
+  class Consumer,Authority,Owner actor;
+  class Bridge bridge;
+  class Grant store;
+  class HA ha;
+`;
+
+Varco is relay-first, and Home Assistant remains the Authority.
+
+<Mermaid chart={architectureFlow} />
+
+## Actors
+
+| Actor | Role |
+| --- | --- |
+| Owner | The person who owns the Home Assistant instance and approves, rejects, revokes, or narrows access. |
+| Consumer | External app, dashboard, script, or browser client. It has its own keypair and self-declared manifest. |
+| Authority | Home Assistant custom integration. It approves grants, enforces policy, executes Home Assistant calls, and stores audit data. |
+| Bridge | Opaque relay, implemented either as a Cloudflare Worker with Durable Object rooms or as a single-process Node in-memory bridge. It routes encrypted envelopes and does not enforce Home Assistant permissions. |
+
+## Flow
+
+1. Home Assistant creates or loads an Authority keypair.
+2. The Authority opens an outbound WebSocket to the bridge.
+3. A consumer connects to the bridge using the Authority ID.
+4. The consumer sends an access request with a manifest and signature.
+5. The owner approves or rejects the request in Home Assistant.
+6. Approval creates a grant bound to the consumer public key.
+7. Later sessions authenticate with the same consumer key.
+8. Data-plane traffic uses the relay path by default and may upgrade to a direct/WebRTC channel when available.
+9. Every data-plane message is checked against the current grant and any owner-managed restrictions before Home Assistant APIs are called.
+10. Relay transport remains available as the fallback even when WebRTC is used.
+
+## Important source files
+
+| File | Responsibility |
+| --- | --- |
+| `custom_components/varco/authority.py` | Authority data-plane handlers and policy enforcement. |
+| `custom_components/varco/relay.py` | Outbound Authority connection and encrypted relay routing. |
+| `custom_components/varco/policy.py` | Scope and restriction matching. |
+| `custom_components/varco/storage.py` | Stored grants, pending requests, and audit records. |
+| `bridge/` | Opaque bridge implementations: Cloudflare Worker/Durable Object and Node in-memory bridge. |
+| `packages/client/src/client.ts` | Browser client relay/WebRTC protocol API. |

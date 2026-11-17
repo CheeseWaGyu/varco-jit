@@ -1,0 +1,39 @@
+---
+title: Pair a consumer
+description: Request, approve, reject, revoke, or delete consumer access.
+---
+
+## Pairing flow
+
+1. Copy the Authority ID from the Varco panel.
+2. Paste it into the consumer app.
+3. The consumer sends an access request with a self-declared manifest.
+4. Home Assistant creates a persistent notification and shows the request in the Varco panel.
+5. Compare the pairing code shown by the consumer with the pairing code shown in Home Assistant.
+6. Review the requested permissions.
+7. Click **Approve** or **Reject**.
+
+You can untick individual permissions in the request card before approving. The grant then contains only the selected subset of the requested manifest; the Authority never widens a request.
+
+## Revoke access
+
+Open `/varco` and review the grant card. Use **Revoke access** to keep the grant record but disable it.
+
+Revocation marks the grant as revoked inside Home Assistant. Active sessions for that consumer are marked closed and subsequent messages are rejected by the Authority.
+
+## Delete a grant record
+
+Use **Delete grant record** to remove the stored grant from the panel. Deleting an active grant also closes active sessions and future authentication fails because no grant exists.
+
+## Recover from a lost consumer identity
+
+The consumer keypair lives in browser storage. If the consumer clears storage or moves to a new device, a new keypair is generated and the old grant no longer matches. The old grant becomes orphaned: still stored, never used again.
+
+To recover:
+
+1. Have the consumer send a new access request. It uses the new key automatically.
+2. Approve the new request in the Varco panel as in normal pairing.
+3. Find the orphaned grant card. Each grant card shows a **Last used** timestamp (`never` if the grant has never authenticated), so a stale grant is easy to spot.
+4. Use **Delete grant record** on the orphaned grant.
+
+The Authority updates `last_used_at` on every successful `authenticate`, so an orphaned grant keeps its last timestamp from before the identity was lost.

@@ -1,0 +1,70 @@
+# Deliberately smaller than default_config to keep the public demo quiet and deterministic.
+frontend:
+history:
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 173.245.48.0/20
+    - 103.21.244.0/22
+    - 103.22.200.0/22
+    - 103.31.4.0/22
+    - 141.101.64.0/18
+    - 108.162.192.0/18
+    - 190.93.240.0/20
+    - 188.114.96.0/20
+    - 197.234.240.0/22
+    - 198.41.128.0/17
+    - 162.158.0.0/15
+    - 104.16.0.0/13
+    - 104.24.0.0/14
+    - 172.64.0.0/13
+    - 131.0.72.0/22
+    - 2400:cb00::/32
+    - 2606:4700::/32
+    - 2803:f800::/32
+    - 2405:b500::/32
+    - 2405:8100::/32
+    - 2a06:98c0::/29
+    - 2c0f:f248::/32
+    - 172.16.0.0/12
+logbook:
+onboarding:
+recorder:
+system_log:
+websocket_api:
+homeassistant:
+  name: Varco Showcase Home
+  country: IT
+  time_zone: Europe/Rome
+  unit_system: metric
+  packages: !include_dir_named packages
+
+varco:
+  bridge_ws_url: wss://varco-bridge.andreabaccega.com
+  webrtc_enabled: true
+
+lovelace:
+  mode: yaml
+  resources:
+    - url: /local/varco-client.js
+      type: module
+    - url: /local/varco-local-hass-card.js
+      type: module
+  dashboards:
+    varco-showcase:
+      mode: yaml
+      title: Varco Showcase
+      icon: mdi:solar-power
+      show_in_sidebar: true
+      filename: dashboards/varco-showcase.yaml
+    varco-local-hass:
+      mode: yaml
+      title: Varco Local Hass
+      icon: mdi:home-assistant
+      show_in_sidebar: true
+      filename: dashboards/varco-local-hass.yaml
+
+logger:
+  default: info
+  logs:
+    custom_components.varco: debug

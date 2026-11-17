@@ -1,0 +1,231 @@
+name: Deploy Home Assistant showcase
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "custom_components/varco/**"
+      - "dev/home-assistant/**"
+      - "examples/gazzetta-energy-showcase/**"
+      - "examples/guest-stay-showcase/**"
+      - "docs/website/src/content/docs/development/**"
+      - ".github/workflows/deploy-ha-showcase.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ha-showcase-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install Python test dependencies
+        run: python -m pip install -r requirements-ci.txt
+
+      - name: Install deploy tools
+        run: sudo apt-get update && sudo apt-get install -y openssh-client rsync curl
+
+      - name: Run test suite
+        run: npm test
+
+      - name: Build Home Assistant local dashboard assets
+        run: npm run dev:ha:local-assets
+
+      - name: Configure SSH
+        env:
+          HA_SHOWCASE_HOST: ${{ secrets.HA_SHOWCASE_HOST }}
+          HA_SHOWCASE_PORT: ${{ secrets.HA_SHOWCASE_PORT }}
+          HA_SHOWCASE_SSH_KEY: ${{ secrets.HA_SHOWCASE_SSH_KEY }}
+          HA_SHOWCASE_SSH_HOST_KEY: ${{ secrets.HA_SHOWCASE_SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$HA_SHOWCASE_HOST"
+          test -n "$HA_SHOWCASE_SSH_KEY"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$HA_SHOWCASE_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          if [ -n "${HA_SHOWCASE_SSH_HOST_KEY:-}" ]; then
+            # Pinned host key: one or more known_hosts lines stored in the
+            # HA_SHOWCASE_SSH_HOST_KEY secret (e.g. "[host]:port ssh-ed25519 AAAA...").
+            # Rotate the secret when the host is rebuilt.
+            printf '%s\n' "$HA_SHOWCASE_SSH_HOST_KEY" >> ~/.ssh/known_hosts
+          else
+            echo "::warning::HA_SHOWCASE_SSH_HOST_KEY secret is not set; falling back to unverified ssh-keyscan (TOFU on every run). Pin the host key to protect against MITM."
+            ssh-keyscan -p "${HA_SHOWCASE_PORT:-22}" "$HA_SHOWCASE_HOST" >> ~/.ssh/known_hosts
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy Home Assistant showcase
+        env:
+          HA_SHOWCASE_HOST: ${{ secrets.HA_SHOWCASE_HOST }}
+          HA_SHOWCASE_USER: ${{ secrets.HA_SHOWCASE_USER }}
+          HA_SHOWCASE_PORT: ${{ secrets.HA_SHOWCASE_PORT }}
+          HA_SHOWCASE_REMOTE_DIR: ${{ secrets.HA_SHOWCASE_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          export SSH_PORT="${HA_SHOWCASE_PORT:-22}"
+          # The HA container's host port is fixed at 127.0.0.1:8123 by the deploy
+          # script; host :80 belongs to nginx. Do not pass a bind port here, or it
+          # collides with nginx (the 2026-06-14 outage).
+          SSH_USER="${HA_SHOWCASE_USER:-root}"
+          REMOTE_DIR="${HA_SHOWCASE_REMOTE_DIR:-/opt/varco-ha-showcase}"
+          ./dev/home-assistant/deploy-to-docker-host.sh "$SSH_USER@$HA_SHOWCASE_HOST" "$REMOTE_DIR"
+
+      - name: Verify Home Assistant HTTP
+        env:
+          HA_SHOWCASE_PUBLIC_URL: ${{ secrets.HA_SHOWCASE_PUBLIC_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HA_SHOWCASE_PUBLIC_URL:-}" ]; then
+            echo "HA_SHOWCASE_PUBLIC_URL not set; skipping public HTTP verification."
+            exit 0
+          fi
+          BASE="${HA_SHOWCASE_PUBLIC_URL%/}"
+          for i in $(seq 1 60); do
+            if curl -fsS "$BASE/" >/dev/null \
+              && curl -fsS "$BASE/varco" >/dev/null \
+              && curl -fsS "$BASE/varco-local-hass/hass-first" >/dev/null \
+              && curl -fsS "$BASE/local/varco-client.js" >/dev/null \
+              && curl -fsS "$BASE/local/varco-local-hass-card.js" >/dev/null; then
+              echo "Home Assistant, Varco panel, local hass dashboard, and local assets responded at $BASE"
+              break
+            fi
+            if [ "$i" = "60" ]; then
+              echo "Home Assistant public dashboard/assets did not respond at $BASE" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          HA_URL="$BASE" HA_USERNAME=test HA_PASSWORD=test npm run dev:ha:local-browser
+
+      - name: Prepare Gazzetta demo grant
+        env:
+          HA_SHOWCASE_HOST: ${{ secrets.HA_SHOWCASE_HOST }}
+          HA_SHOWCASE_HTTP_PORT: ${{ secrets.HA_SHOWCASE_HTTP_PORT }}
+          HA_SHOWCASE_USERNAME: test
+          HA_SHOWCASE_PASSWORD: test
+        run: |
+          set -euo pipefail
+          if [ -z "${HA_SHOWCASE_HOST:-}" ]; then
+            echo "HA_SHOWCASE_HOST not set; skipping Gazzetta demo grant."
+            exit 0
+          fi
+          # HA_SHOWCASE_HTTP_PORT is the public ingress port (nginx), default 80.
+          HA_PORT="${HA_SHOWCASE_HTTP_PORT:-80}"
+          if [ "$HA_PORT" = "80" ]; then
+            printf -v HA_URL '%s://%s' http "$HA_SHOWCASE_HOST"
+          else
+            printf -v HA_URL '%s://%s:%s' http "$HA_SHOWCASE_HOST" "$HA_PORT"
+          fi
+          export HA_URL
+          export HA_CLIENT_ID="http://localhost:8123/"
+          export HA_USERNAME="${HA_SHOWCASE_USERNAME:-test}"
+          export HA_PASSWORD="${HA_SHOWCASE_PASSWORD:-test}"
+          for attempt in $(seq 1 12); do
+            if npm run dev:ha:gazzetta-demo; then
+              break
+            fi
+            if [ "$attempt" = "12" ]; then
+              echo "Failed to prepare Gazzetta demo grant after $attempt attempts." >&2
+              exit 1
+            fi
+            echo "Home Assistant auth not ready yet; retrying Gazzetta grant preparation ($attempt/12)."
+            sleep 5
+          done
+          rm -rf .pi/gazzetta-demo-dist
+          mkdir -p .pi/gazzetta-demo-dist
+          cp examples/gazzetta-energy-showcase/dist/index.html examples/gazzetta-energy-showcase/dist/main.js .pi/gazzetta-demo-dist/
+
+      - name: Prepare guest stay demo grant
+        env:
+          HA_SHOWCASE_HOST: ${{ secrets.HA_SHOWCASE_HOST }}
+          HA_SHOWCASE_HTTP_PORT: ${{ secrets.HA_SHOWCASE_HTTP_PORT }}
+          HA_SHOWCASE_USERNAME: test
+          HA_SHOWCASE_PASSWORD: test
+        run: |
+          set -euo pipefail
+          if [ -z "${HA_SHOWCASE_HOST:-}" ]; then
+            echo "HA_SHOWCASE_HOST not set; skipping guest stay demo grant."
+            exit 0
+          fi
+          # HA_SHOWCASE_HTTP_PORT is the public ingress port (nginx), default 80.
+          HA_PORT="${HA_SHOWCASE_HTTP_PORT:-80}"
+          if [ "$HA_PORT" = "80" ]; then
+            printf -v HA_URL '%s://%s' http "$HA_SHOWCASE_HOST"
+          else
+            printf -v HA_URL '%s://%s:%s' http "$HA_SHOWCASE_HOST" "$HA_PORT"
+          fi
+          export HA_URL
+          export HA_CLIENT_ID="http://localhost:8123/"
+          export HA_USERNAME="${HA_SHOWCASE_USERNAME:-test}"
+          export HA_PASSWORD="${HA_SHOWCASE_PASSWORD:-test}"
+          for attempt in $(seq 1 12); do
+            if npm run dev:ha:guest-stay-demo; then
+              break
+            fi
+            if [ "$attempt" = "12" ]; then
+              echo "Failed to prepare guest stay demo grant after $attempt attempts." >&2
+              exit 1
+            fi
+            echo "Home Assistant auth not ready yet; retrying guest stay grant preparation ($attempt/12)."
+            sleep 5
+          done
+          rm -rf .pi/guest-stay-demo-dist
+          mkdir -p .pi/guest-stay-demo-dist
+          cp examples/guest-stay-showcase/dist/index.html examples/guest-stay-showcase/dist/main.js .pi/guest-stay-demo-dist/
+
+      - name: Deploy Gazzetta demo to Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "CLOUDFLARE_API_TOKEN not set; skipping Gazzetta demo deploy."
+            exit 0
+          fi
+          npx wrangler deploy .pi/gazzetta-demo-dist --name varco-demo --compatibility-date 2026-06-07 --domain varco-demo.andreabaccega.com
+          curl -fsS https://varco-demo.andreabaccega.com/ >/dev/null
+          echo "Gazzetta demo responded at https://varco-demo.andreabaccega.com/"
+
+      - name: Deploy guest stay demo to Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "CLOUDFLARE_API_TOKEN not set; skipping guest stay demo deploy."
+            exit 0
+          fi
+          npx wrangler deploy .pi/guest-stay-demo-dist --name varco-guest-demo --compatibility-date 2026-06-07 --domain varco-guest-demo.andreabaccega.com
+          curl -fsS https://varco-guest-demo.andreabaccega.com/ >/dev/null
+          echo "Guest stay demo responded at https://varco-guest-demo.andreabaccega.com/"

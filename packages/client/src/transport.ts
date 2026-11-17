@@ -1,0 +1,203 @@
+import { ed25519 } from "@noble/curves/ed25519";
+import { b64urlDecode, b64urlEncode, canonicalJson, nonce, utf8, wsUrl } from "./encoding.js";
+import { randomId } from "./identity.js";
+import type { VarcoTransport } from "./types.js";
+
+function bufferSource(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+
+async function importServerPublic(spki: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey("spki", bufferSource(b64urlDecode(spki)), { name: "ECDH", namedCurve: "P-256" }, false, []);
+}
+
+async function exportPublic(key: CryptoKey): Promise<string> {
+  return b64urlEncode(new Uint8Array(await crypto.subtle.exportKey("spki", key)));
+}
+
+async function deriveHkdf(material: CryptoKey, authorityId: string, info: string, usage: KeyUsage[]): Promise<CryptoKey> {
+  return crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: bufferSource(b64urlDecode(authorityId)), info: bufferSource(utf8(info)) },
+    material,
+    { name: "AES-GCM", length: 256 },
+    false,
+    usage,
+  );
+}
+
+type SessionKeys = { send: CryptoKey; recv: CryptoKey; channelBinding: string };
+
+async function deriveSessionKeys(privateKey: CryptoKey, publicKey: CryptoKey, authorityId: string): Promise<SessionKeys> {
+  const bits = await crypto.subtle.deriveBits({ name: "ECDH", public: publicKey }, privateKey, 256);
+  const material = await crypto.subtle.importKey("raw", bits, "HKDF", false, ["deriveKey", "deriveBits"]);
+  const send = await deriveHkdf(material, authorityId, "varco-session-c2s-v1", ["encrypt"]);
+  const recv = await deriveHkdf(material, authorityId, "varco-session-s2c-v1", ["decrypt"]);
+  const bindingBits = await crypto.subtle.deriveBits(
+    { name: "HKDF", hash: "SHA-256", salt: bufferSource(b64urlDecode(authorityId)), info: bufferSource(utf8("varco-channel-binding-v1")) },
+    material,
+    256,
+  );
+  return { send, recv, channelBinding: b64urlEncode(new Uint8Array(bindingBits)) };
+}
+
+// Message types relayed even by a signaling-only bridge: pairing, session
+// auth, and WebRTC negotiation. The lane tag is envelope metadata the bridge
+// can see; it carries no plaintext and grants no permissions.
+const SIGNALING_TYPES = new Set(["access_request", "authenticate", "webrtc_offer", "webrtc_ice"]);
+const SIGNALING_ONLY_ERROR = "Bridge is signaling-only: P2P required but unavailable";
+
+export function envelopeLane(payloadType: unknown): "signaling" | null {
+  return SIGNALING_TYPES.has(String(payloadType)) ? "signaling" : null;
+}
+
+export function closeError(code: number | undefined): Error {
+  return new Error(code === 4405 ? SIGNALING_ONLY_ERROR : "Varco transport closed");
+}
+
+
+export class RelayTransport implements VarcoTransport {
+  private ws: WebSocket | null = null;
+  private keys: SessionKeys | null = null;
+  private sendNonce = 0;
+  private recvNonce = 0;
+  private pending = new Map<string, { resolve: (value: any) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  private eventHandler: ((event: any) => void) | null = null;
+  private closeHandler: (() => void) | null = null;
+  private ready: Promise<void> | null = null;
+  private closed = false;
+
+  constructor(private bridgeUrl: string, private authorityId: string, private requestTimeoutMs = 30_000) {}
+
+  onEvent(handler: (event: any) => void): void { this.eventHandler = handler; }
+
+  onClose(handler: () => void): void { this.closeHandler = handler; }
+
+  async channelBinding(): Promise<string> {
+    await this.ensureConnected();
+    return this.keys!.channelBinding;
+  }
+
+  async request(message: Record<string, unknown>): Promise<any> {
+    await this.ensureConnected();
+    const requestId = (message.request_id as string | undefined) ?? randomId(8);
+    const withId = { ...message, request_id: requestId };
+    const encrypted = await this.encrypt(withId);
+    this.ws?.send(JSON.stringify(encrypted));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(requestId);
+        reject(new Error(`Varco request timed out: ${String(message.type)}`));
+      }, this.requestTimeoutMs);
+      this.pending.set(requestId, { resolve, reject, timer });
+    });
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    this.ws?.close();
+    this.failPending(new Error("Varco transport closed"));
+  }
+
+  private failPending(err: Error): void {
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.timer);
+      entry.reject(err);
+    }
+    this.pending.clear();
+  }
+
+  private async ensureConnected(): Promise<void> {
+    if (this.closed) throw new Error("Varco transport closed");
+    const ready = this.ready ?? (this.ready = this.connect());
+    try {
+      await ready;
+    } catch (err) {
+      if (this.ready === ready) this.ready = null;
+      throw err;
+    }
+  }
+
+  private async connect(): Promise<void> {
+    const ecdh = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+    const clientPub = await exportPublic(ecdh.publicKey);
+    const ws = new WebSocket(wsUrl(this.bridgeUrl, this.authorityId));
+    this.ws = ws;
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => ws.send(JSON.stringify({ type: "client_hello", client_pub: clientPub }));
+      ws.onerror = () => reject(new Error("Varco WebSocket failed"));
+      ws.onclose = () => reject(new Error("Varco WebSocket closed during handshake"));
+      ws.onmessage = async (event) => {
+        try {
+          const outer = JSON.parse(String(event.data));
+          const payload = outer.payload ?? outer;
+          if (payload.type === "server_hello") {
+            const serverPubBytes = b64urlDecode(payload.server_pub);
+            const transcript = new Uint8Array(utf8("varco-server-hello-v1\0").length + b64urlDecode(clientPub).length + 1 + serverPubBytes.length);
+            let offset = 0;
+            const prefix = utf8("varco-server-hello-v1\0"); transcript.set(prefix, offset); offset += prefix.length;
+            const clientBytes = b64urlDecode(clientPub); transcript.set(clientBytes, offset); offset += clientBytes.length;
+            transcript[offset] = 0; offset += 1;
+            transcript.set(serverPubBytes, offset);
+            if (!ed25519.verify(b64urlDecode(payload.signature), transcript, b64urlDecode(this.authorityId))) throw new Error("Bad authority signature");
+            this.keys = await deriveSessionKeys(ecdh.privateKey, await importServerPublic(payload.server_pub), this.authorityId);
+            ws.onmessage = (messageEvent) => {
+              this.handleMessage(String(messageEvent.data)).catch((err) => {
+                this.failPending(err instanceof Error ? err : new Error(String(err)));
+                ws.close();
+              });
+            };
+            ws.onclose = (closeEvent) => {
+              const code = (closeEvent as CloseEvent | undefined)?.code;
+              const wasClosed = this.closed;
+              this.closed = true;
+              this.failPending(closeError(code));
+              // Signaling-only rejection (4405) and explicit close() are final;
+              // anything else is a network drop the owner may want to recover from.
+              if (!wasClosed && code !== 4405) this.closeHandler?.();
+            };
+            resolve();
+          }
+        } catch (err) {
+          reject(err as Error);
+          ws.close();
+        }
+      };
+    });
+  }
+
+  private async encrypt(payload: Record<string, unknown>): Promise<Record<string, string>> {
+    if (!this.keys) throw new Error("Varco session is not ready");
+    const n = nonce(this.sendNonce++);
+    const body = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: bufferSource(n) }, this.keys.send, bufferSource(utf8(canonicalJson(payload)))));
+    const envelope: Record<string, string> = { type: "ciphertext", nonce: b64urlEncode(n), body: b64urlEncode(body) };
+    const lane = envelopeLane(payload.type);
+    if (lane) envelope.lane = lane;
+    return envelope;
+  }
+
+  private async decrypt(envelope: any): Promise<any> {
+    if (!this.keys) throw new Error("Varco session is not ready");
+    const n = b64urlDecode(envelope.nonce);
+    const expected = nonce(this.recvNonce++);
+    if (n.some((value, index) => value !== expected[index])) throw new Error("Unexpected nonce");
+    const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: bufferSource(n) }, this.keys.recv, bufferSource(b64urlDecode(envelope.body)));
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  }
+
+  private async handleMessage(data: string): Promise<void> {
+    const outer = JSON.parse(data);
+    if (outer.type === "relay_disabled") throw new Error(SIGNALING_ONLY_ERROR);
+    const payload = await this.decrypt(outer.payload ?? outer);
+    const requestId = payload.request_id;
+    if (requestId && this.pending.has(requestId)) {
+      const pending = this.pending.get(requestId)!;
+      this.pending.delete(requestId);
+      clearTimeout(pending.timer);
+      if (payload.type === "error") pending.reject(Object.assign(new Error(payload.message), { code: payload.code }));
+      else pending.resolve(payload);
+      return;
+    }
+    this.eventHandler?.(payload);
+  }
+}

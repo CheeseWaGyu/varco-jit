@@ -1,0 +1,56 @@
+---
+title: Trust model
+description: What Varco trusts, what it does not trust, and what must remain true.
+---
+
+Varco's core rule is simple: Home Assistant decides access.
+
+## Trusted for permission decisions
+
+Only the Home Assistant Authority enforces permissions. It stores grants, checks scopes, executes Home Assistant calls locally, and records audit events.
+
+## Not trusted for permission decisions
+
+The consumer is not trusted. It may request a small manifest, but every later message must still be checked against the stored grant.
+
+The bridge is not trusted. It routes encrypted envelopes and may observe metadata, but it must not see application plaintext or decide whether an entity or service call is allowed.
+
+## Public bridge has open registration by default
+
+The shared public bridge accepts any Authority that presents a valid ed25519 key pair. There is no invite or admin gating by default: anyone can register an Authority ID and consume bridge resources. Permission decisions are unaffected, because the bridge never decides access.
+
+A bridge operator can set the `AUTHORITY_ALLOWLIST` environment variable to restrict which Authority IDs may register. This is registration control, not a substitute for the signature challenge: allowlisted IDs still have to prove key ownership through the normal Ed25519 challenge, and the allowlist never influences grant or scope decisions, which stay in Home Assistant. See [Bridge endpoints](../../reference/bridge-endpoints/).
+
+The optional `ORIGIN_POLICY=restricted` setting limits which browser origins can reach the bridge. Origin checks are browser containment, not authentication: non-browser clients do not send an `Origin` header and are always allowed, and any client can forge the header outside a browser.
+
+`GET /presence/{authorityId}` exposes only whether an Authority ID currently has an authenticated bridge connection (`{"online": true|false}`). It reveals no entity data, but it does confirm that a given Authority ID exists and is online. Operators who consider that metadata sensitive can set `PRESENCE_VISIBILITY` to `restricted` or `disabled`.
+
+## Encryption boundary
+
+The bridge can observe:
+
+- Authority ID.
+- Connection timing.
+- Session counts.
+- Message sizes.
+- Rate-limit events.
+
+The bridge should not see:
+
+- Entity state payloads.
+- Service call data.
+- History data.
+- Camera snapshots.
+- Manifest contents after secure-session setup.
+
+## Security invariants
+
+Do not break these invariants:
+
+1. Never give a Home Assistant long-lived access token to a consumer.
+2. Never trust the bridge for permission checks.
+3. Never trust the consumer manifest after approval without checking the stored grant.
+4. Enforce grant scopes on every data-plane request.
+5. Keep revocation authoritative in Home Assistant storage.
+6. Do not log Home Assistant state payloads, camera bodies, or history payloads in audit events.
+7. Keep relay as a fully working fallback even when WebRTC exists.

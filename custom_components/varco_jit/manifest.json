@@ -1,0 +1,20 @@
+{
+  "domain": "varco_jit",
+  "name": "Varco JIT",
+  "codeowners": [
+    "@vekexasia"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "http",
+    "websocket_api",
+    "persistent_notification"
+  ],
+  "documentation": "https://vekexasia.github.io/varco/",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/vekexasia/varco/issues",
+  "requirements": [
+    "cryptography>=44.0.0"
+  ],
+  "version": "0.7.0-jit.1"
+}

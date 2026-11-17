@@ -1,0 +1,45 @@
+# Public infrastructure values used by the Home Assistant showcase.
+(?:173\.245\.48\.0|103\.21\.244\.0|103\.22\.200\.0|103\.31\.4\.0|141\.101\.64\.0|108\.162\.192\.0|190\.93\.240\.0|188\.114\.96\.0|197\.234\.240\.0|198\.41\.128\.0|162\.158\.0\.0|104\.16\.0\.0|104\.24\.0\.0|172\.64\.0\.0|131\.0\.72\.0|2400:cb00::|2606:4700::|2803:f800::|2405:b500::|2405:8100::|2a06:98c0::|2c0f:f248::|172\.16\.0\.0)
+2a01-4f8-171-3481--106\.sslip\.io
+http://203\.0\.113\.10
+http://localhost:8123/
+3j3rQeFlaFN1KOphZ2E4b7fFWoZSjF1A6KqgsntDhUg
+http://localhost:8123/
+http://\$\{HA_SHOWCASE_HOST\}
+# Public project identity (GitHub repo, owner handle, integration name).
+https://github\.com/vekexasia/varco/issues
+https://vekexasia\.github\.io/varco/
+Varco
+# Home Assistant action scope examples use service@entity syntax, not emails.
+(?:light|switch|climate|cover|fan|button|scene|number|lock|media_player|select)\.[a-z_]+@(?:light|switch|climate|cover|fan|button|scene|number|lock|media_player|select)\.[a-z0-9_]+
+# RFC 5737 documentation IPs used as placeholders in PRD/CI examples.
+http://192\.0\.2\.\d{1,3}:8123
+# Public Home Assistant container image with pinned digest (ci.yml).
+ghcr\.io/home-assistant/home-assistant:[0-9.]+@sha256:[0-9a-f]{64}
+# Public project URLs in install docs.
+https://github\.com/vekexasia/varco
+# Public demo origin examples in bridge-endpoints docs.
+https://varco-demo\.andreabaccega\.com
+http://localhost:5173
+# OPF flags the image reference user@host style span without the registry prefix.
+home-assistant:[0-9][0-9.]*@sha256:[0-9a-f]{64}
+# GitHub Actions pinned to commit SHAs (issue #34) get flagged as user@host.
+@[0-9a-f]{40}\b
+# OPF span variants of the public HA image reference.
+^ghcr\.io/home-assistant/home-assistant$
+^[0-9][0-9.]*@sha256:[0-9a-f]{64}$
+# x264 encoder metadata inside showcase MP4 binaries (videolan banner URL).
+http://www\.videolan\.org/x264\.html
+# Public CDN assets used by the guest-stay showcase UI (fonts, stock photos).
+https://fonts\.googleapis\.com(/css2\?[\w@&;:,.+=-]*)?
+https://fonts\.gstatic\.com
+https://images\.unsplash\.com/photo-[0-9a-f-]+\?auto=format&fit=crop&w=\d+&q=\d+
+# Browser localStorage key for the guest showcase grant (not a secret value).
+^varco\.guestStayShowcase\.grant\.v1$
+# Public npm registry and documentation-only Cloudflare Worker placeholder URLs.
+https://registry\.npmjs\.org
+https://my-varco-bridge\.example\.workers\.dev(?:/(?:health|presence/AUTHORITY_ID))?
+wss://my-varco-bridge\.example\.workers\.dev
+# Public YouTube video overview links in README.
+^https?://(www\.)?youtube\.com/watch\?v=QSR6oZzUb4Y$
+^https?://img\.youtube\.com/vi/QSR6oZzUb4Y/maxresdefault\.jpg$
