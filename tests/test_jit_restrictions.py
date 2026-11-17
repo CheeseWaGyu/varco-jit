@@ -296,6 +296,32 @@ def test_malformed_condition_fails_closed():
     asyncio.run(run())
 
 
+def test_match_any_with_invalid_condition_denies_action():
+    """Regression (audit): match=any plus one passing condition must not
+    bypass a second, malformed condition."""
+    async def run():
+        authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
+        await set_restrictions(store, grant, [{
+            "id": "any-with-typo",
+            "type": "jit",
+            "enabled": True,
+            "applies_to": "actions",
+            "params": {
+                "match": "any",
+                "conditions": [
+                    {"entity_id": "sensor.temperature", "operator": "below", "value": 25},  # passes (21)
+                    {"entity_id": "device_tracker.phone", "operator": "is_not_home", "value": "home"},  # invalid operator
+                ],
+            },
+        }])
+
+        denied = await start_vacuum(authority)
+        assert denied["code"] == "jit_denied"
+        assert hass.services.calls == []
+
+    asyncio.run(run())
+
+
 def test_jit_restriction_for_other_action_does_not_block():
     async def run():
         authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
