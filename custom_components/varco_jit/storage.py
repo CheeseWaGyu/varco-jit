@@ -166,10 +166,12 @@ class MemoryVarcoStore:
             try:
                 expires = datetime.fromisoformat(expires_at)
             except (TypeError, ValueError):
-                continue
-            if expires.tzinfo is None:
+                # Fail closed: an unparseable expiry is treated as expired
+                # so corrupt data cannot make a share immortal.
+                expires = None
+            if expires is not None and expires.tzinfo is None:
                 expires = expires.replace(tzinfo=timezone.utc)
-            if now >= expires:
+            if expires is None or now >= expires:
                 deleted.append(share_id)
                 data["shares"].pop(share_id, None)
         if deleted:
@@ -214,10 +216,12 @@ class MemoryVarcoStore:
             try:
                 expires = datetime.fromisoformat(expires_at)
             except (TypeError, ValueError):
-                continue
-            if expires.tzinfo is None:
+                # Fail closed: an unparseable expiry is treated as expired
+                # so corrupt data cannot make a grant immortal.
+                expires = None
+            if expires is not None and expires.tzinfo is None:
                 expires = expires.replace(tzinfo=timezone.utc)
-            if now >= expires:
+            if expires is None or now >= expires:
                 deleted.append(raw.get("grant_id"))
                 data["grants"].pop(consumer_pk, None)
                 self._grant_index.pop(raw.get("grant_id"), None)
