@@ -51,6 +51,16 @@ Meaning:
 
 Service calls may also target `area_id`, `device_id`, or `label_id`. The Authority resolves those targets to entity IDs through the Home Assistant area, device, entity, and label registries, then checks every resolved entity against the action scopes. The call is denied if any resolved entity is not authorized, or if a target cannot be resolved (unknown ID, registries unavailable). When all resolved entities pass, the original target is forwarded unchanged so Home Assistant performs its own resolution.
 
+## Share manifests
+
+Share links (`varco_jit/create_share`) and preapproved grants (`varco_jit/create_preapproved_grant`) are minted from a manifest without a per-claim owner approval step: creating the link is the owner's pre-approval, bounded by `max_claims`, expiry, and revocation. Because there is no second approval, share manifests are held to a narrower rule than access-request manifests:
+
+- Shares are read-only by default. The panel's entity share and dashboard share flows grant no actions unless the owner explicitly ticks individual services.
+- Control is granted per service, as explicit scopes such as `lock.lock@lock.front_door` — one scope per ticked service.
+- Wildcard action scopes are rejected for share manifests. Any `actions` entry containing `*` (for example `lock.*@lock.front_door`, `*@lock.front_door`, or `lock.*`) fails validation with a `ManifestError`, surfaced by the admin WebSocket API as `invalid_manifest`.
+
+The normal access-request approval flow is not affected: an owner may still deliberately approve wildcard action scopes there.
+
 ## Runtime subscriptions
 
 A grant defines the maximum allowed scope. A runtime subscription defines the current subset of entities the consumer wants to observe.
