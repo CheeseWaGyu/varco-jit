@@ -8,6 +8,7 @@ export interface HassConnection {
 export interface Hass {
   connection: HassConnection;
   states?: Record<string, { entity_id: string; state: string; attributes?: Record<string, unknown> }>;
+  services?: Record<string, Record<string, unknown>>;
   callWS?: <T = unknown>(message: { type: string; [key: string]: unknown }) => Promise<T>;
 }
 
