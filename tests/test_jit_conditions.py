@@ -134,6 +134,63 @@ def test_invalid_specs_fail_closed():
     assert not not_a_dict.allowed
 
 
+def test_match_any_denies_when_any_condition_is_invalid():
+    """Regression (audit): under match=any, a malformed condition must deny
+    the whole restriction even when another condition passes."""
+    conditions = [
+        {"entity_id": "device_tracker.phone", "operator": "is", "value": "home"},  # passes
+        {"entity_id": "sensor.temperature", "operator": "approx", "value": 1},  # invalid operator
+    ]
+    decision = evaluate(conditions, match="any")
+    assert not decision.allowed
+    assert decision.errors
+    assert any(f.reason == "invalid_condition" for f in decision.failures)
+
+    missing_value = [
+        {"entity_id": "device_tracker.phone", "operator": "is", "value": "home"},
+        {"entity_id": "sensor.temperature", "operator": "is"},  # value missing
+    ]
+    assert not evaluate(missing_value, match="any").allowed
+
+
+def test_match_any_denies_when_numeric_expected_is_not_numeric():
+    """A non-numeric expected value for a numeric operator is a config error."""
+    conditions = [
+        {"entity_id": "device_tracker.phone", "operator": "is", "value": "home"},  # passes
+        {"entity_id": "sensor.temperature", "operator": "above", "value": "warm"},  # invalid expected
+    ]
+    decision = evaluate(conditions, match="any")
+    assert not decision.allowed
+    assert decision.errors
+    assert validate_conditions({"conditions": conditions[1:], "match": "any"})
+
+
+def raising_lookup(entity_id):
+    raise RuntimeError("state store unavailable")
+
+
+def test_state_lookup_error_fails_closed_for_not_exists():
+    """Regression (audit): a lookup exception is not absence; not_exists
+    passes only when the lookup cleanly returns None."""
+    decision = evaluate_jit_params(
+        {"conditions": [{"entity_id": "sensor.ghost", "operator": "not_exists"}]},
+        raising_lookup,
+    )
+    assert not decision.allowed
+    assert decision.failures[0].reason == "state_lookup_error"
+
+
+def test_state_lookup_error_fails_closed_for_positive_operators():
+    for condition in (
+        {"entity_id": "device_tracker.phone", "operator": "is", "value": "home"},
+        {"entity_id": "device_tracker.phone", "operator": "exists"},
+        {"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home"},
+    ):
+        decision = evaluate_jit_params({"conditions": [condition]}, raising_lookup)
+        assert not decision.allowed
+        assert decision.failures[0].reason == "state_lookup_error"
+
+
 def test_validate_conditions_reports_errors():
     assert validate_conditions({"conditions": [{"entity_id": "sensor.temperature", "operator": "is", "value": "21.5"}]}) == []
     assert validate_conditions({"conditions": []})
