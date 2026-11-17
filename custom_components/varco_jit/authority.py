@@ -11,7 +11,7 @@ from typing import Any, Callable
 from . import audit
 from .crypto import generate_consumer_keypair, new_id, pairing_code, verify_access_request, verify_authenticate
 from .jit import audit_failure, evaluate_jit_params, jit_restrictions
-from .manifest import ManifestError, validate_manifest
+from .manifest import ManifestError, reject_wildcard_share_actions, validate_manifest
 from .models import AccessRequest, Grant, Share, hash_pin, utcnow
 from .policy import (
     camera_entities,
@@ -156,6 +156,7 @@ class VarcoAuthority:
 
     async def create_preapproved_grant(self, manifest: dict[str, Any], expires_at: str | None = None, restrictions: list[dict[str, Any]] | None = None) -> tuple[Grant, dict[str, str]]:
         manifest = validate_manifest(manifest)
+        reject_wildcard_share_actions(manifest)
         identity = generate_consumer_keypair()
         normalized_restrictions = [self._normalize_restriction(item) for item in restrictions or [] if isinstance(item, dict)]
         grant = await self.store.async_create_preapproved_grant(identity["public_key"], manifest, expires_at=expires_at, restrictions=normalized_restrictions)
@@ -164,6 +165,7 @@ class VarcoAuthority:
 
     async def create_share(self, name: str, manifest: dict[str, Any], max_claims: int = 1, expires_at: str | None = None, restrictions: list[dict[str, Any]] | None = None, note: str | None = None) -> tuple[Share, str]:
         manifest = validate_manifest(manifest)
+        reject_wildcard_share_actions(manifest)
         secret = new_id(32)
         share = Share(
             share_id=new_id(16),
