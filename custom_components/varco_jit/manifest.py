@@ -59,6 +59,24 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     return _canonicalize(validated)
 
 
+def reject_wildcard_share_actions(manifest: dict[str, Any]) -> None:
+    """Reject wildcard action scopes in a share manifest.
+
+    Share links and preapproved grants are minted from a manifest without a
+    per-claim owner approval step, so their action scopes must name explicit
+    ``domain.service@entity_id`` pairs. A wildcard such as
+    ``lock.*@lock.front_door`` would silently grant every service of a
+    domain on the entity (including e.g. ``lock.unlock``). Raises
+    :class:`ManifestError` on the first wildcard action scope found.
+    """
+    for action in manifest.get("actions") or []:
+        if "*" in str(action):
+            raise ManifestError(
+                "Share manifests cannot contain wildcard action scopes; "
+                "list explicit domain.service@entity_id actions"
+            )
+
+
 def coerce_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     """Leniently normalize a stored manifest to canonical snake_case.
 
