@@ -82,6 +82,7 @@ export class VarcoPanel extends HTMLElement {
   private _toast: Toast | null = null;
   private _authCopied = false;
   private _shareEntityId = '';
+  private _shareServices = new Set<string>();
   private _shareName = '';
   private _shareClaims = '1';
   private _shareUrl = '';
@@ -103,6 +104,7 @@ export class VarcoPanel extends HTMLElement {
   private _selectedViewIndex: string | number = '';
   private _selectedEntities = new Set<string>();
   private _selectedActionEntities = new Set<string>();
+  private _selectedActionServices = new Map<string, Set<string>>();
   private _crcTable?: number[];
 
   set hass(hass: Hass) {
@@ -899,6 +901,7 @@ export class VarcoPanel extends HTMLElement {
         <label class="field">Entity</label>
         <input data-share-entity placeholder="Start typing a name or entity id" value="${this.escape(this._shareEntityId)}" autocomplete="off">
         <div class="share-suggestions" data-share-suggestions></div>
+        <div data-share-services>${this.shareServicesInner()}</div>
         <label class="field">Share name</label>
         <input data-share-name placeholder="Mario living room light" value="${this.escape(this._shareName)}">
         <label class="field">Allowed link uses</label>
@@ -907,15 +910,51 @@ export class VarcoPanel extends HTMLElement {
       </div>`;
   }
 
-  entityShareManifest(entityId: string, name: string): Manifest {
+  entityShareManifest(entityId: string, name: string, services: string[] = []): Manifest {
     const domain = entityId.split('.')[0];
     return {
       name,
       version: '1',
       read_entities: [entityId],
       subscriptions: [entityId],
-      actions: ['sensor', 'binary_sensor'].includes(domain) ? [] : [`${domain}.*@${entityId}`],
+      // Shares are read-only unless the owner explicitly ticks individual
+      // services; never emit a wildcard action scope for a share.
+      actions: services.map((service) => `${domain}.${service}@${entityId}`),
     };
+  }
+
+  entityServices(entityId: string): string[] {
+    const domain = entityId.split('.')[0];
+    const services = this._hass?.services?.[domain];
+    return services ? Object.keys(services).sort() : [];
+  }
+
+  shareServicesInner(): string {
+    const entityId = this._shareEntityId.trim();
+    if (!/^\w+\.[\w-]+$/.test(entityId) || !this.canControlEntity(entityId)) return '';
+    const services = this.entityServices(entityId);
+    if (!services.length) {
+      return `<label class="field">Control services (optional)</label>
+        <p class="muted">No services are known for this domain, so this share stays read-only.</p>`;
+    }
+    const domain = entityId.split('.')[0];
+    return `<label class="field">Control services (optional)</label>
+      ${services.map((service) => `<label class="entity-row"><input type="checkbox" data-share-service="${this.escape(service)}" ${this._shareServices.has(service) ? 'checked' : ''}> <span><code>${this.escape(domain)}.${this.escape(service)}</code></span></label>`).join('')}
+      <p class="muted">No service ticked = read-only share. Only the ticked services are granted, as explicit scopes.</p>`;
+  }
+
+  updateShareServices(): void {
+    const box = this.querySelector<HTMLElement>('[data-share-services]');
+    if (!box) return;
+    box.innerHTML = this.shareServicesInner();
+    box.querySelectorAll<HTMLInputElement>('[data-share-service]').forEach((el) => {
+      el.onchange = () => this.toggleShareService(el.dataset.shareService!, el.checked);
+    });
+  }
+
+  toggleShareService(service: string, checked: boolean): void {
+    if (checked) this._shareServices.add(service);
+    else this._shareServices.delete(service);
   }
 
   localShareUrl(shareUrl: string): string {
@@ -958,6 +997,7 @@ export class VarcoPanel extends HTMLElement {
       button.onclick = () => {
         const entityId = button.dataset.sharePick || '';
         this._shareEntityId = entityId;
+        this._shareServices = new Set();
         input.value = entityId;
         const nameInput = this.querySelector<HTMLInputElement>('[data-share-name]');
         if (nameInput && !nameInput.value.trim()) {
@@ -965,6 +1005,7 @@ export class VarcoPanel extends HTMLElement {
           nameInput.value = this._shareName;
         }
         box.innerHTML = '';
+        this.updateShareServices();
       };
     });
   }
@@ -984,7 +1025,7 @@ export class VarcoPanel extends HTMLElement {
         type: 'varco_jit/create_share',
         name,
         max_claims: maxClaims,
-        manifest: this.entityShareManifest(entityId, name),
+        manifest: this.entityShareManifest(entityId, name, Array.from(this._shareServices)),
       });
       this._shareUrl = this.localShareUrl(response.share_url);
       this.flash('Share link minted', 'ok');
@@ -1072,7 +1113,13 @@ export class VarcoPanel extends HTMLElement {
       subscriptions: selected.filter((e) => e.scopes.subscriptions).map((e) => e.entity_id),
       history: selected.filter((e) => e.scopes.history).map((e) => e.entity_id),
       camera_snapshots: selected.filter((e) => e.scopes.camera_snapshots).map((e) => e.entity_id),
-      actions: selected.filter((e) => this._selectedActionEntities.has(e.entity_id) && this.canControlEntity(e.entity_id)).map((e) => `${e.entity_id.split('.')[0]}.*@${e.entity_id}`),
+      // Control is opt-in per entity AND per service: only explicitly
+      // ticked services become action scopes, never a wildcard.
+      actions: selected.flatMap((e) => {
+        if (!this._selectedActionEntities.has(e.entity_id) || !this.canControlEntity(e.entity_id)) return [];
+        const domain = e.entity_id.split('.')[0];
+        return Array.from(this._selectedActionServices.get(e.entity_id) || []).sort().map((service) => `${domain}.${service}@${e.entity_id}`);
+      }),
     };
     if (result.manifest?.dashboard && typeof result.manifest.dashboard === 'object') {
       const selectedIds = new Set(selected.map((entity) => entity.entity_id));
@@ -1095,6 +1142,8 @@ export class VarcoPanel extends HTMLElement {
     const ref = entity.references?.[0];
     const canAct = this.canControlEntity(entity.entity_id);
     const actionChecked = this._selectedActionEntities.has(entity.entity_id);
+    const chosenServices = this._selectedActionServices.get(entity.entity_id) || new Set<string>();
+    const serviceList = canAct && actionChecked ? this.entityServices(entity.entity_id) : [];
     return `
       <label class="entity-row">
         <input type="checkbox" data-export-entity="${this.escape(entity.entity_id)}" ${entity.selected ? 'checked' : ''}>
@@ -1102,6 +1151,8 @@ export class VarcoPanel extends HTMLElement {
           <code>${this.escape(entity.entity_id)}</code>
           <small>${this.escape(scopes.join(', ') || 'referenced')} ${ref ? `from ${this.escape(ref.view)} / ${this.escape(ref.card_type)}` : ''}</small>
           ${canAct ? `<small><input type="checkbox" data-export-action-entity="${this.escape(entity.entity_id)}" ${actionChecked ? 'checked' : ''} ${entity.selected ? '' : 'disabled'}> allow controls</small>` : ''}
+          ${serviceList.map((service) => `<small><input type="checkbox" data-export-action-service="${this.escape(entity.entity_id)}" data-export-service="${this.escape(service)}" ${chosenServices.has(service) ? 'checked' : ''} ${entity.selected ? '' : 'disabled'}> ${this.escape(entity.entity_id.split('.')[0])}.${this.escape(service)}</small>`).join('')}
+          ${canAct && actionChecked && !serviceList.length ? '<small class="muted">No services known for this domain; no control is granted.</small>' : ''}
         </span>
       </label>`;
   }
@@ -1161,6 +1212,7 @@ export class VarcoPanel extends HTMLElement {
     this._exportShareUrl = '';
     this._selectedEntities = new Set(result.entities.filter((e) => e.selected).map((e) => e.entity_id));
     this._selectedActionEntities = new Set();
+    this._selectedActionServices = new Map();
   }
 
   async requestDashboardExport(selectedEntities?: string[]): Promise<ExportResult> {
@@ -1180,7 +1232,10 @@ export class VarcoPanel extends HTMLElement {
     if (!this._selectedEntities) this._selectedEntities = new Set();
     if (checked) this._selectedEntities.add(entityId);
     else this._selectedEntities.delete(entityId);
-    if (!checked) this._selectedActionEntities.delete(entityId);
+    if (!checked) {
+      this._selectedActionEntities.delete(entityId);
+      this._selectedActionServices.delete(entityId);
+    }
     if (this._exportResult) {
       this._exportResult.entities = this._exportResult.entities.map((e) => (e.entity_id === entityId ? { ...e, selected: checked } : e));
     }
@@ -1190,9 +1245,23 @@ export class VarcoPanel extends HTMLElement {
 
   toggleActionEntity(entityId: string, checked: boolean): void {
     if (checked) this._selectedActionEntities.add(entityId);
-    else this._selectedActionEntities.delete(entityId);
+    else {
+      this._selectedActionEntities.delete(entityId);
+      this._selectedActionServices.delete(entityId);
+    }
     this._exportShareUrl = '';
     if (this._lastState) this.render(this._lastState);
+  }
+
+  toggleActionService(entityId: string, service: string, checked: boolean): void {
+    let services = this._selectedActionServices.get(entityId);
+    if (!services) {
+      services = new Set<string>();
+      this._selectedActionServices.set(entityId, services);
+    }
+    if (checked) services.add(service);
+    else services.delete(service);
+    this._exportShareUrl = '';
   }
 
   async downloadDashboardBrief(): Promise<void> {
@@ -1688,9 +1757,15 @@ export class VarcoPanel extends HTMLElement {
     // entity share
     const shareEntity = this.querySelector<HTMLInputElement>('[data-share-entity]');
     if (shareEntity) {
-      shareEntity.oninput = () => { this._shareEntityId = shareEntity.value; this.updateShareSuggestions(shareEntity); };
+      shareEntity.oninput = () => {
+        if (shareEntity.value !== this._shareEntityId) this._shareServices = new Set();
+        this._shareEntityId = shareEntity.value;
+        this.updateShareSuggestions(shareEntity);
+        this.updateShareServices();
+      };
       shareEntity.onfocus = () => this.updateShareSuggestions(shareEntity);
     }
+    this.querySelectorAll<HTMLInputElement>('[data-share-service]').forEach((el) => { el.onchange = () => this.toggleShareService(el.dataset.shareService!, el.checked); });
     const shareName = this.querySelector<HTMLInputElement>('[data-share-name]');
     if (shareName) shareName.oninput = () => { this._shareName = shareName.value; };
     const shareClaims = this.querySelector<HTMLInputElement>('[data-share-claims]');
@@ -1707,6 +1782,7 @@ export class VarcoPanel extends HTMLElement {
     if (viewSelect) viewSelect.onchange = () => void this.pickView(viewSelect.value);
     this.querySelectorAll<HTMLInputElement>('[data-export-entity]').forEach((el) => { el.onchange = () => this.toggleEntity(el.dataset.exportEntity!, el.checked); });
     this.querySelectorAll<HTMLInputElement>('[data-export-action-entity]').forEach((el) => { el.onchange = () => this.toggleActionEntity(el.dataset.exportActionEntity!, el.checked); });
+    this.querySelectorAll<HTMLInputElement>('[data-export-action-service]').forEach((el) => { el.onchange = () => this.toggleActionService(el.dataset.exportActionService!, el.dataset.exportService!, el.checked); });
     const exportShareUses = this.querySelector<HTMLInputElement>('[data-export-share-uses]');
     if (exportShareUses) exportShareUses.oninput = () => { this._exportShareUses = exportShareUses.value; };
     const download = this.querySelector<HTMLElement>('[data-download-brief]');
