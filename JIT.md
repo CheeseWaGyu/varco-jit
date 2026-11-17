@@ -147,8 +147,12 @@ Failure `reason` values:
   satisfy the comparison (including a missing attribute).
 - `entity_unavailable` — the entity is missing, or its state is
   `unknown` / `unavailable`.
-- `non_numeric` — a numeric operator was used but the actual or
-  expected value does not parse as a number.
+- `non_numeric` — a numeric operator was used but the actual value
+  does not parse as a number. (A non-numeric *expected* value is a
+  configuration error: `invalid_condition`.)
+- `state_lookup_error` — reading the entity's state raised an error.
+  A lookup error is never treated as absence, so it fails every
+  operator, including `not_exists`.
 - `invalid_condition` — the condition itself is malformed (no
   `entity_id`, unknown operator, missing `value`, …). Malformed
   restrictions fail closed and the validation problems are also listed
@@ -211,9 +215,17 @@ entity ids / operators / reasons).
 - State `unknown` or `unavailable`: fails every positive operator
   (`entity_unavailable`) — including `is_not`, so an unreadable presence
   tracker can never accidentally satisfy an “is not home” condition.
-- Numeric operator on a non-numeric value: fails (`non_numeric`).
+- Numeric operator on a non-numeric actual value: fails
+  (`non_numeric`). A non-numeric expected value for a numeric operator
+  is a configuration error (`invalid_condition`).
 - Malformed restriction (no conditions, bad operator, missing value,
-  bad `match`): fails (`invalid_condition`).
+  bad `match`): fails (`invalid_condition`). Validation errors deny the
+  whole restriction **regardless of `match`** — under `match: "any"` a
+  broken condition is never skipped just because another condition
+  passes.
+- State lookup error: fails (`state_lookup_error`) for every operator.
+  `not_exists` passes only when the lookup cleanly returns “no such
+  entity”; an error while reading state is not absence.
 - Disabled restrictions (`enabled: false`) are skipped, as with all
   restriction types.
 
