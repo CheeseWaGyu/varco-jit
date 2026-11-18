@@ -89,6 +89,12 @@ class ConditionResult:
     attribute: str | None = None
     expected: Any = None
     actual: Any = None
+    # Per-condition reveal directive copied from the condition spec:
+    # True/False when the condition sets "reveal_actual" explicitly,
+    # None when it inherits the restriction-level default. The Authority
+    # applies it in _jit_denied_error; an explicit value wins in both
+    # directions over the restriction default and grant readability.
+    reveal_actual: bool | None = None
 
     def as_dict(self, *, include_actual: bool = True) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -158,7 +164,24 @@ def _validate_condition(condition: Any) -> list[str]:
     attribute = condition.get("attribute")
     if attribute is not None and not isinstance(attribute, str):
         errors.append("attribute must be a string")
+    if "reveal_actual" in condition and not isinstance(condition.get("reveal_actual"), bool):
+        errors.append("reveal_actual must be a boolean")
     return errors
+
+
+def condition_reveal_actual(condition: Any) -> bool | None:
+    """Return a condition's explicit ``reveal_actual`` directive.
+
+    ``True`` / ``False`` when the condition sets it to a boolean, else
+    ``None`` (inherit the restriction-level default). A non-boolean
+    value is a validation error, so it is treated as unset here and the
+    restriction fails closed through validation instead.
+    """
+    if isinstance(condition, dict):
+        value = condition.get("reveal_actual")
+        if isinstance(value, bool):
+            return value
+    return None
 
 
 def evaluate_jit_params(params: Any, state_lookup: StateLookup) -> JitDecision:
@@ -204,6 +227,14 @@ def evaluate_jit_params(params: Any, state_lookup: StateLookup) -> JitDecision:
 
 
 def _evaluate_condition(condition: Any, state_lookup: StateLookup) -> ConditionResult:
+    result = _evaluate_condition_inner(condition, state_lookup)
+    # Stamp the per-condition reveal directive onto the result so the
+    # Authority's reveal rule can apply it per failure (per entity).
+    result.reveal_actual = condition_reveal_actual(condition)
+    return result
+
+
+def _evaluate_condition_inner(condition: Any, state_lookup: StateLookup) -> ConditionResult:
     if _validate_condition(condition):
         entity_id = condition.get("entity_id") if isinstance(condition, dict) else None
         operator = condition.get("operator") if isinstance(condition, dict) else None
