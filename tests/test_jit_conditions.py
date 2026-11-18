@@ -1,9 +1,19 @@
 """Unit tests for the pure JIT condition evaluator (jit.py)."""
+from datetime import datetime, timezone
+
 from custom_components.varco_jit.jit import (
+    ConditionResult,
+    actual_disclosable,
     audit_failure,
+    denial_category,
+    denial_rate_limit,
+    diagnostic_covers,
     evaluate_jit_params,
+    resolve_disclosure,
     validate_conditions,
 )
+
+NOW = datetime(2026, 11, 18, 0, 0, tzinfo=timezone.utc)
 
 STATES = {
     "device_tracker.phone": {"entity_id": "device_tracker.phone", "state": "home", "attributes": {}},
@@ -239,3 +249,100 @@ def test_audit_failure_drops_actual():
         "reason": "condition_not_met",
     }
     assert "actual" not in summary
+
+
+def test_resolve_disclosure_defaults_and_fail_closed_fallbacks():
+    policy = resolve_disclosure({})
+    assert policy.response_level == "generic"
+    assert policy.audit_level == "structured"
+    assert policy.response_fields["actual"] is False
+
+    # Unknown levels fall back to the safest level for that channel.
+    policy = resolve_disclosure({"disclosure": {"level": "verbose", "audit": {"level": "everything"}}})
+    assert policy.response_level == "generic"
+    assert policy.audit_level == "structured"
+
+    # A present but non-boolean field toggle hides the field.
+    policy = resolve_disclosure({"disclosure": {"level": "structured", "fields": {"entity_id": "yes"}}})
+    assert policy.response_fields["entity_id"] is False
+    assert policy.response_fields["expected"] is True
+
+    # Actual values can never be enabled for the audit channel.
+    policy = resolve_disclosure({"disclosure": {"audit": {"fields": {"actual": True}}}})
+    assert policy.audit_fields["actual"] is False
+
+
+def test_denial_category_mapping():
+    unavailable = evaluate([{"entity_id": "sensor.missing", "operator": "is", "value": "x"}])
+    assert denial_category(unavailable) == "state_unavailable"
+    not_met = evaluate([{"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home"}])
+    assert denial_category(not_met) == "condition_not_met"
+    broken = evaluate([{"entity_id": "sensor.temperature", "operator": "bogus", "value": 1}])
+    assert denial_category(broken) == "configuration_error"
+
+
+def test_diagnostic_covers_requires_entity_field_and_live_expiry():
+    params = {"diagnostics": [
+        {"entity_id": "device_tracker.phone", "fields": ["state"], "expires_at": "2999-01-01T00:00:00Z"},
+        {"entity_id": "sensor.temperature", "fields": ["unit_of_measurement"], "expires_at": "2999-01-01T00:00:00Z"},
+        {"entity_id": "binary_sensor.door", "fields": ["state"], "expires_at": "2000-01-01T00:00:00Z"},
+        {"entity_id": "climate.living", "fields": ["state"], "expires_at": "2999-01-01T00:00:00"},
+    ]}
+    assert diagnostic_covers(params, "device_tracker.phone", None, NOW) is True
+    # Field not named by the grant: the state grant does not cover attributes.
+    assert diagnostic_covers(params, "device_tracker.phone", "battery_level", NOW) is False
+    assert diagnostic_covers(params, "sensor.temperature", "unit_of_measurement", NOW) is True
+    assert diagnostic_covers(params, "sensor.temperature", None, NOW) is False
+    # Expired and timezone-less expiries never cover.
+    assert diagnostic_covers(params, "binary_sensor.door", None, NOW) is False
+    assert diagnostic_covers(params, "climate.living", None, NOW) is False
+    # No clock, no coverage.
+    assert diagnostic_covers(params, "device_tracker.phone", None, None) is False
+
+
+def test_actual_disclosable_is_capped_by_permission_and_only_tightened_by_reveal():
+    failure = ConditionResult("device_tracker.phone", "is_not", False, reason="condition_not_met", expected="home", actual="home")
+    structured = {"disclosure": {"level": "structured", "fields": {"actual": True}}}
+
+    # Readable under the grant: disclosable.
+    policy = resolve_disclosure(structured)
+    assert actual_disclosable(structured, policy, ["device_tracker.phone"], failure, NOW) is True
+    # reveal_actual=True cannot open an entity the grant cannot read.
+    params = {**structured, "reveal_actual": True}
+    assert actual_disclosable(params, policy, [], failure, NOW) is False
+    # A diagnostic grant can open it, within its expiry.
+    params = {**structured, "diagnostics": [
+        {"entity_id": "device_tracker.phone", "fields": ["state"], "expires_at": "2999-01-01T00:00:00Z"},
+    ]}
+    assert actual_disclosable(params, policy, [], failure, NOW) is True
+    # Tightening wins over both readability and diagnostics.
+    hidden = ConditionResult("device_tracker.phone", "is_not", False, reason="condition_not_met", expected="home", actual="home", reveal_actual=False)
+    assert actual_disclosable(params, policy, ["device_tracker.phone"], hidden, NOW) is False
+    assert actual_disclosable({**structured, "reveal_actual": False}, policy, ["device_tracker.phone"], failure, NOW) is False
+    # The field toggle and the level both gate disclosure.
+    policy = resolve_disclosure({"disclosure": {"level": "structured"}})
+    assert actual_disclosable(structured, policy, ["device_tracker.phone"], failure, NOW) is False
+    policy = resolve_disclosure({"disclosure": {"level": "category", "fields": {"actual": True}}})
+    assert actual_disclosable(structured, policy, ["device_tracker.phone"], failure, NOW) is False
+
+
+def test_denial_rate_limit_parsing():
+    assert denial_rate_limit({}) == (10, 60.0)
+    assert denial_rate_limit({"denial_rate_limit": {"limit": 3, "window_seconds": 30}}) == (3, 30.0)
+    # Malformed values fall back to the defaults; the budget stays on.
+    assert denial_rate_limit({"denial_rate_limit": {"limit": 0, "window_seconds": -5}}) == (10, 60.0)
+    assert denial_rate_limit({"denial_rate_limit": {"limit": True}}) == (10, 60.0)
+
+
+def test_validate_conditions_reports_disclosure_errors():
+    base = {"entity_id": "sensor.temperature", "operator": "is", "value": "21.5"}
+    assert validate_conditions({"conditions": [base], "disclosure": {"level": "structured"}}) == []
+    assert validate_conditions({"conditions": [base], "disclosure": {"level": "verbose"}})
+    assert validate_conditions({"conditions": [base], "disclosure": {"fields": {"entity_id": "yes"}}})
+    assert validate_conditions({"conditions": [base], "disclosure": {"fields": {"bogus": True}}})
+    assert validate_conditions({"conditions": [base], "reveal_actual": "yes"})
+    assert validate_conditions({"conditions": [base], "diagnostics": [{"entity_id": "sensor.temperature", "fields": ["state"]}]})
+    assert validate_conditions({"conditions": [base], "diagnostics": [
+        {"entity_id": "sensor.temperature", "fields": ["state"], "expires_at": "2999-01-01T00:00:00Z"},
+    ]}) == []
+    assert validate_conditions({"conditions": [base], "denial_rate_limit": {"limit": 0}})
