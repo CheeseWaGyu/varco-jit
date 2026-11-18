@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from . import audit
 from .crypto import generate_consumer_keypair, new_id, pairing_code, verify_access_request, verify_authenticate
-from .jit import audit_failure, evaluate_jit_params, jit_restrictions
+from .jit import actual_disclosable, audit_failure, denial_category, denial_rate_limit, evaluate_jit_params, jit_restrictions, resolve_disclosure
 from .manifest import ManifestError, reject_wildcard_share_actions, validate_expires_at, validate_manifest
 from .models import AccessRequest, Grant, Share, hash_pin, utcnow
 from .policy import (
@@ -90,6 +90,7 @@ class VarcoAuthority:
         self.monotonic_provider = monotonic_provider or time.monotonic
         self.sessions: dict[str, RuntimeSession] = {}
         self._rate_hits: dict[tuple[str, str], list[float]] = {}
+        self._jit_denial_hits: dict[tuple[str, str], list[float]] = {}
         self._access_request_last: dict[str, float] = {}
         self.access_request_min_interval = 5.0
         self.data_plane_rate_limit = 240
@@ -233,6 +234,8 @@ class VarcoAuthority:
     def _clear_rate_hits_for_grant(self, grant_id: str) -> None:
         for key in [key for key in self._rate_hits if key[0] == grant_id]:
             self._rate_hits.pop(key, None)
+        for key in [key for key in self._jit_denial_hits if key[0] == grant_id]:
+            self._jit_denial_hits.pop(key, None)
 
     async def revoke_grant(self, grant_id: str) -> Grant:
         grant = await self.store.async_revoke_grant(grant_id)
@@ -609,71 +612,158 @@ class VarcoAuthority:
                 return await self._jit_denied_error(grant, operation, context, message, restriction_id, params, decision)
         return None
 
+    def _record_jit_denial(self, grant_id: str, restriction_id: str, params: dict[str, Any]) -> bool:
+        """Record a JIT denial and report whether the denial budget is spent.
+
+        Repeated denials are an oracle for the protected state (each
+        denial confirms a condition still does not hold), so once a
+        grant burns through its per-restriction denial budget inside
+        the window, responses are flattened to a generic denial until
+        the window slides past.
+        """
+        limit, window = denial_rate_limit(params)
+        now = self.monotonic_provider()
+        hits = self._jit_denial_hits.setdefault((grant_id, restriction_id), [])
+        hits[:] = [hit for hit in hits if now - hit < window]
+        over_budget = len(hits) >= limit
+        hits.append(now)
+        return over_budget
+
     async def _jit_denied_error(self, grant: Grant, operation: str, context: dict[str, Any], message: dict[str, Any], restriction_id: str, params: dict[str, Any], decision: Any) -> dict[str, Any]:
-        # Reveal rule for the consumer-facing payload: an actual state value
-        # is included only when the owner opted in via reveal_actual, or the
-        # condition entity is already readable under this grant. A condition
-        # may set its own reveal_actual, which wins in both directions over
-        # the restriction-level default and grant readability, so the owner
-        # chooses per entity what may be revealed. The audit log never
-        # stores actual values, regardless of the reveal rule.
-        reveal_actual = params.get("reveal_actual") is True
+        # The response channel and the audit channel are governed by
+        # independent disclosure settings (see jit.resolve_disclosure).
+        # The audit event is written first and follows the audit
+        # policy regardless of what the consumer is told.
+        policy = resolve_disclosure(params)
+        now = self.now_provider()
+        category = denial_category(decision)
+        over_budget = self._record_jit_denial(grant.grant_id, restriction_id, params)
+        audit_details = self._jit_audit_details(policy, operation, context, restriction_id, category, decision, rate_limited=over_budget)
+        # Primary audit event for JIT denials is "jit_denied" (not the generic
+        # "restriction_denied"), so the structured cause stays queryable.
+        await audit.async_log(self.store, "jit_denied", grant.grant_id, audit_details)
+        _LOGGER.warning("Varco JIT denied %s by restriction %s: %s", operation, restriction_id, self._jit_audit_summary(audit_details))
+        request_id = message.get("request_id")
+        if over_budget:
+            # Denial budget spent: flatten to a plain scope-style denial
+            # so repeated attempts stop yielding any signal at all.
+            return {"type": "error", "request_id": request_id, "code": "permission_denied", "message": "Permission denied"}
+        if policy.response_level == "generic":
+            # Only the denial code and the request id: no restriction,
+            # entity, expected or actual values, in the payload or the
+            # message.
+            return {"type": "error", "request_id": request_id, "code": "jit_denied", "message": "Permission denied"}
+        if policy.response_level == "category":
+            return {
+                "type": "error",
+                "request_id": request_id,
+                "code": "jit_denied",
+                "message": f"JIT restriction denied [{category}]",
+                "jit": {"category": category},
+            }
+        # Structured: per-field disclosure. The message is composed
+        # from the same disclosed fields, so a hidden field cannot leak
+        # through the human-readable text either.
+        fields = policy.response_fields
         readable = read_entities(grant.manifest)
         failures_payload: list[dict[str, Any]] = []
         message_parts: list[str] = []
         for failure in decision.failures:
-            if failure.reveal_actual is not None:
-                reveal = failure.reveal_actual
-            else:
-                reveal = reveal_actual or (failure.entity_id is not None and entity_allowed(failure.entity_id, readable))
-            entry = failure.as_dict(include_actual=False)
-            if reveal:
-                entry["actual"] = failure.actual
-            else:
-                entry["actual"] = None
-                entry["actual_redacted"] = True
+            entry: dict[str, Any] = {}
+            if fields["entity_id"]:
+                entry["entity_id"] = failure.entity_id
+            if fields["attribute"]:
+                entry["attribute"] = failure.attribute
+            if fields["operator"]:
+                entry["operator"] = failure.operator
+            if fields["expected"]:
+                entry["expected"] = failure.expected
+            if fields["reason"]:
+                entry["reason"] = failure.reason
+            show_actual = actual_disclosable(params, policy, readable, failure, now)
+            if fields["actual"]:
+                if show_actual:
+                    entry["actual"] = failure.actual
+                else:
+                    entry["actual"] = None
+                    entry["actual_redacted"] = True
             failures_payload.append(entry)
-            if failure.entity_id is None:
-                message_parts.append(f"invalid JIT condition [{failure.reason}]")
-                continue
-            part = f"{failure.entity_id} {failure.operator} {failure.expected}"
-            if reveal:
-                part += f" (actual: {failure.actual})"
-            if failure.reason and failure.reason != "condition_not_met":
-                part += f" [{failure.reason}]"
-            message_parts.append(part)
-        audit_details: dict[str, Any] = {
-            "operation": operation,
-            "restriction_id": restriction_id,
-            "failures": [audit_failure(failure) for failure in decision.failures],
-        }
-        for key in ("domain", "service", "entity_ids"):
-            if context.get(key):
-                audit_details[key] = context[key]
-        # Primary audit event for JIT denials is "jit_denied" (not the generic
-        # "restriction_denied"), so the structured cause stays queryable.
-        await audit.async_log(self.store, "jit_denied", grant.grant_id, audit_details)
-        audit_summary = "; ".join(
-            f"{item['entity_id']} {item['operator']} {item['expected']} [{item['reason']}]" for item in audit_details["failures"]
-        )
-        _LOGGER.warning("Varco JIT denied %s by restriction %s: %s", operation, restriction_id, audit_summary)
-        jit_payload: dict[str, Any] = {
-            "restriction_id": restriction_id,
-            "operation": operation,
-            "evaluated_at": self.now_provider().isoformat(),
-            "match": decision.match,
-            "failures": failures_payload,
-        }
+            message_parts.append(self._jit_failure_message_part(fields, failure, show_actual))
+        jit_payload: dict[str, Any] = {}
+        if fields["restriction_id"]:
+            jit_payload["restriction_id"] = restriction_id
+        jit_payload["operation"] = operation
+        jit_payload["evaluated_at"] = now.isoformat()
+        jit_payload["match"] = decision.match
+        jit_payload["failures"] = failures_payload
         if decision.errors:
             jit_payload["errors"] = decision.errors
-        summary = "; ".join(message_parts) if message_parts else "no conditions evaluated"
+        summary = "; ".join(part for part in message_parts if part) or "no details disclosed"
+        if fields["restriction_id"]:
+            text = f"JIT restriction '{restriction_id}' denied: {summary}"
+        else:
+            text = f"JIT restriction denied: {summary}"
         return {
             "type": "error",
-            "request_id": message.get("request_id"),
+            "request_id": request_id,
             "code": "jit_denied",
-            "message": f"JIT restriction '{restriction_id}' denied: {summary}",
+            "message": text,
             "jit": jit_payload,
         }
+
+    @staticmethod
+    def _jit_failure_message_part(fields: dict[str, bool], failure: Any, show_actual: bool) -> str:
+        if failure.entity_id is None:
+            return f"invalid JIT condition [{failure.reason}]" if fields["reason"] and failure.reason else "invalid JIT condition"
+        parts: list[str] = []
+        if fields["entity_id"]:
+            parts.append(str(failure.entity_id))
+        if fields["attribute"] and failure.attribute:
+            parts.append(f"attribute {failure.attribute}")
+        if fields["operator"] and failure.operator:
+            parts.append(str(failure.operator))
+        if fields["expected"]:
+            parts.append(str(failure.expected))
+        text = " ".join(parts)
+        if show_actual:
+            text += f" (actual: {failure.actual})"
+        if fields["reason"] and failure.reason and failure.reason != "condition_not_met":
+            text += f" [{failure.reason}]"
+        return text
+
+    @staticmethod
+    def _jit_audit_details(policy: Any, operation: str, context: dict[str, Any], restriction_id: str, category: str, decision: Any, *, rate_limited: bool) -> dict[str, Any]:
+        if policy.audit_level == "generic":
+            details: dict[str, Any] = {"operation": operation}
+        elif policy.audit_level == "category":
+            details = {"operation": operation, "restriction_id": restriction_id, "category": category}
+        else:
+            details = {
+                "operation": operation,
+                "restriction_id": restriction_id,
+                "failures": [
+                    {key: value for key, value in audit_failure(failure).items() if policy.audit_fields.get(key, True)}
+                    for failure in decision.failures
+                ],
+            }
+            for key in ("domain", "service", "entity_ids"):
+                if context.get(key):
+                    details[key] = context[key]
+        if rate_limited:
+            details["denial_rate_limited"] = True
+        return details
+
+    @staticmethod
+    def _jit_audit_summary(details: dict[str, Any]) -> str:
+        failures = details.get("failures")
+        if isinstance(failures, list) and failures:
+            return "; ".join(
+                " ".join(str(part) for part in (item.get("entity_id"), item.get("operator"), item.get("expected"), f"[{item.get('reason')}]" if item.get("reason") else None) if part)
+                for item in failures
+            )
+        if details.get("category"):
+            return str(details["category"])
+        return "details withheld by audit disclosure policy"
 
     async def _render_template(self, value_template: str) -> Any:
         if self.hass is not None and hasattr(self.hass, "varco_jit_render_template"):
