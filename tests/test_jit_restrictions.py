@@ -199,6 +199,93 @@ def test_actual_revealed_when_reveal_actual_is_true():
     asyncio.run(run())
 
 
+def test_per_condition_reveal_actual_reveals_only_that_entity():
+    async def run():
+        authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
+        await set_restrictions(store, grant, [{
+            "id": "two-conditions",
+            "type": "jit",
+            "enabled": True,
+            "applies_to": "vacuum.start@vacuum.robot",
+            "params": {
+                "conditions": [
+                    {"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home", "reveal_actual": True},
+                    {"entity_id": "sensor.temperature", "operator": "above", "value": 30},
+                ],
+                "match": "all",
+            },
+        }])
+
+        denied = await start_vacuum(authority)
+
+        assert denied["code"] == "jit_denied"
+        failures = denied["jit"]["failures"]
+        assert len(failures) == 2
+        # The phone condition opted in per-condition: its actual is shown
+        # even though the restriction has no reveal_actual and the grant
+        # cannot read the phone.
+        assert failures[0]["entity_id"] == "device_tracker.phone"
+        assert failures[0]["actual"] == "home"
+        assert "actual_redacted" not in failures[0]
+        # The temperature condition has no directive: it inherits the
+        # restriction default (hidden), so its actual stays redacted.
+        assert failures[1]["entity_id"] == "sensor.temperature"
+        assert failures[1]["actual"] is None
+        assert failures[1]["actual_redacted"] is True
+
+    asyncio.run(run())
+
+
+def test_per_condition_reveal_actual_false_overrides_restriction_default():
+    async def run():
+        authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
+        restriction = {
+            **AWAY_RESTRICTION,
+            "params": {
+                "conditions": [
+                    {"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home", "reveal_actual": False},
+                ],
+                "match": "all",
+                "reveal_actual": True,
+            },
+        }
+        await set_restrictions(store, grant, [restriction])
+
+        denied = await start_vacuum(authority)
+
+        assert denied["code"] == "jit_denied"
+        failure = denied["jit"]["failures"][0]
+        assert failure["actual"] is None
+        assert failure["actual_redacted"] is True
+
+    asyncio.run(run())
+
+
+def test_per_condition_reveal_actual_false_overrides_grant_readability():
+    async def run():
+        manifest = {**VACUUM_MANIFEST, "read_entities": ["device_tracker.phone"]}
+        authority, store, hass, grant = await paired_authority(manifest)
+        restriction = {
+            **AWAY_RESTRICTION,
+            "params": {
+                "conditions": [
+                    {"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home", "reveal_actual": False},
+                ],
+                "match": "all",
+            },
+        }
+        await set_restrictions(store, grant, [restriction])
+
+        denied = await start_vacuum(authority)
+
+        assert denied["code"] == "jit_denied"
+        failure = denied["jit"]["failures"][0]
+        assert failure["actual"] is None
+        assert failure["actual_redacted"] is True
+
+    asyncio.run(run())
+
+
 def test_numeric_sensor_condition():
     async def run():
         authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
