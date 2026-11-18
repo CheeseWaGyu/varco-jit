@@ -25,6 +25,18 @@ AWAY_RESTRICTION = {
 }
 
 
+def structured(restriction, fields=None, **extra_params):
+    """Copy a restriction with structured denial disclosure opted in."""
+    import copy
+
+    result = copy.deepcopy(restriction)
+    disclosure = {"level": "structured"}
+    if fields is not None:
+        disclosure["fields"] = fields
+    result["params"] = {**result["params"], "disclosure": disclosure, **extra_params}
+    return result
+
+
 class FakeStates:
     def __init__(self):
         self.values = {
@@ -116,7 +128,7 @@ async def start_vacuum(authority):
 def test_vacuum_denied_while_phone_home_with_structured_cause():
     async def run():
         authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
-        await set_restrictions(store, grant, [AWAY_RESTRICTION])
+        await set_restrictions(store, grant, [structured(AWAY_RESTRICTION, fields={"actual": True})])
 
         denied = await start_vacuum(authority)
 
@@ -169,7 +181,7 @@ def test_actual_revealed_when_condition_entity_is_readable():
     async def run():
         manifest = {**VACUUM_MANIFEST, "read_entities": ["device_tracker.phone"]}
         authority, store, hass, grant = await paired_authority(manifest)
-        await set_restrictions(store, grant, [AWAY_RESTRICTION])
+        await set_restrictions(store, grant, [structured(AWAY_RESTRICTION, fields={"actual": True})])
 
         denied = await start_vacuum(authority)
 
@@ -182,53 +194,59 @@ def test_actual_revealed_when_condition_entity_is_readable():
     asyncio.run(run())
 
 
-def test_actual_revealed_when_reveal_actual_is_true():
+def test_reveal_actual_alone_does_not_reveal_beyond_read_permission():
     async def run():
         authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
-        restriction = {
-            **AWAY_RESTRICTION,
-            "params": {**AWAY_RESTRICTION["params"], "reveal_actual": True},
-        }
+        restriction = structured(
+            {
+                **AWAY_RESTRICTION,
+                "params": {**AWAY_RESTRICTION["params"], "reveal_actual": True},
+            },
+            fields={"actual": True},
+        )
         await set_restrictions(store, grant, [restriction])
 
         denied = await start_vacuum(authority)
 
+        # reveal_actual is tightening-only now: with no read permission
+        # and no diagnostic grant, the actual stays hidden even when the
+        # owner set reveal_actual and enabled the field.
         assert denied["code"] == "jit_denied"
-        assert denied["jit"]["failures"][0]["actual"] == "home"
+        failure = denied["jit"]["failures"][0]
+        assert failure["actual"] is None
+        assert failure["actual_redacted"] is True
 
     asyncio.run(run())
 
 
-def test_per_condition_reveal_actual_reveals_only_that_entity():
+def test_per_condition_reveal_actual_false_hides_only_that_entity():
     async def run():
-        authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
-        await set_restrictions(store, grant, [{
+        manifest = {**VACUUM_MANIFEST, "read_entities": ["device_tracker.phone", "sensor.temperature"]}
+        authority, store, hass, grant = await paired_authority(manifest)
+        await set_restrictions(store, grant, [structured({
             "id": "two-conditions",
             "type": "jit",
             "enabled": True,
             "applies_to": "vacuum.start@vacuum.robot",
             "params": {
                 "conditions": [
-                    {"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home", "reveal_actual": True},
-                    {"entity_id": "sensor.temperature", "operator": "above", "value": 30},
+                    {"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home"},
+                    {"entity_id": "sensor.temperature", "operator": "above", "value": 30, "reveal_actual": False},
                 ],
                 "match": "all",
             },
-        }])
+        }, fields={"actual": True})])
 
         denied = await start_vacuum(authority)
 
         assert denied["code"] == "jit_denied"
         failures = denied["jit"]["failures"]
         assert len(failures) == 2
-        # The phone condition opted in per-condition: its actual is shown
-        # even though the restriction has no reveal_actual and the grant
-        # cannot read the phone.
+        # Both entities are readable, so the phone's actual is shown...
         assert failures[0]["entity_id"] == "device_tracker.phone"
         assert failures[0]["actual"] == "home"
         assert "actual_redacted" not in failures[0]
-        # The temperature condition has no directive: it inherits the
-        # restriction default (hidden), so its actual stays redacted.
+        # ...but the temperature condition tightens its own reveal off.
         assert failures[1]["entity_id"] == "sensor.temperature"
         assert failures[1]["actual"] is None
         assert failures[1]["actual_redacted"] is True
@@ -236,19 +254,17 @@ def test_per_condition_reveal_actual_reveals_only_that_entity():
     asyncio.run(run())
 
 
-def test_per_condition_reveal_actual_false_overrides_restriction_default():
+def test_restriction_reveal_actual_false_hides_readable_actual():
     async def run():
-        authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
-        restriction = {
-            **AWAY_RESTRICTION,
-            "params": {
-                "conditions": [
-                    {"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home", "reveal_actual": False},
-                ],
-                "match": "all",
-                "reveal_actual": True,
+        manifest = {**VACUUM_MANIFEST, "read_entities": ["device_tracker.phone"]}
+        authority, store, hass, grant = await paired_authority(manifest)
+        restriction = structured(
+            {
+                **AWAY_RESTRICTION,
+                "params": {**AWAY_RESTRICTION["params"], "reveal_actual": False},
             },
-        }
+            fields={"actual": True},
+        )
         await set_restrictions(store, grant, [restriction])
 
         denied = await start_vacuum(authority)
@@ -274,7 +290,7 @@ def test_per_condition_reveal_actual_false_overrides_grant_readability():
                 "match": "all",
             },
         }
-        await set_restrictions(store, grant, [restriction])
+        await set_restrictions(store, grant, [structured(restriction, fields={"actual": True})])
 
         denied = await start_vacuum(authority)
 
@@ -294,7 +310,7 @@ def test_numeric_sensor_condition():
             "type": "state_condition",
             "enabled": True,
             "applies_to": "vacuum.start@vacuum.robot",
-            "params": {"conditions": [{"entity_id": "sensor.temperature", "operator": "above", "value": 30}]},
+            "params": {"conditions": [{"entity_id": "sensor.temperature", "operator": "above", "value": 30}], "disclosure": {"level": "structured"}},
         }])
 
         denied = await start_vacuum(authority)
@@ -318,6 +334,7 @@ def test_match_any_allows_when_one_condition_passes():
             "applies_to": "actions",
             "params": {
                 "match": "any",
+                "disclosure": {"level": "structured"},
                 "conditions": [
                     {"entity_id": "device_tracker.phone", "operator": "is", "value": "work"},
                     {"entity_id": "sensor.temperature", "operator": "below", "value": 25},
@@ -344,7 +361,7 @@ def test_missing_entity_fails_closed():
             "type": "jit",
             "enabled": True,
             "applies_to": "actions",
-            "params": {"conditions": [{"entity_id": "sensor.missing", "operator": "is", "value": "x"}]},
+            "params": {"conditions": [{"entity_id": "sensor.missing", "operator": "is", "value": "x"}], "disclosure": {"level": "structured"}},
         }])
 
         denied = await start_vacuum(authority)
@@ -363,7 +380,7 @@ def test_malformed_condition_fails_closed():
             "type": "jit",
             "enabled": True,
             "applies_to": "actions",
-            "params": {"conditions": [{"entity_id": "sensor.temperature", "operator": "approx", "value": 1}]},
+            "params": {"conditions": [{"entity_id": "sensor.temperature", "operator": "approx", "value": 1}], "disclosure": {"level": "structured"}},
         }])
         denied = await start_vacuum(authority)
         assert denied["code"] == "jit_denied"
@@ -395,6 +412,7 @@ def test_match_any_with_invalid_condition_denies_action():
             "applies_to": "actions",
             "params": {
                 "match": "any",
+                "disclosure": {"level": "structured"},
                 "conditions": [
                     {"entity_id": "sensor.temperature", "operator": "below", "value": 25},  # passes (21)
                     {"entity_id": "device_tracker.phone", "operator": "is_not_home", "value": "home"},  # invalid operator
@@ -450,5 +468,208 @@ def test_jit_denial_does_not_consume_rate_limit_budget():
         rate_denied = await start_vacuum(authority)
         assert rate_denied["code"] == "permission_denied"
         assert len(hass.services.calls) == 1
+
+    asyncio.run(run())
+
+
+def test_default_disclosure_is_generic_and_leaks_nothing():
+    async def run():
+        authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
+        await set_restrictions(store, grant, [AWAY_RESTRICTION])
+
+        denied = await start_vacuum(authority)
+
+        assert denied["code"] == "jit_denied"
+        assert "jit" not in denied
+        assert denied["message"] == "Permission denied"
+        for leak in ("device_tracker.phone", "vacuum-only-when-away", "is_not", "home"):
+            assert leak not in denied["message"]
+        # The audit channel is independent: it still records the
+        # structured summary for the owner, without actual values.
+        audit = await store.async_audit_events()
+        jit_events = [event for event in audit if event["event"] == "jit_denied"]
+        assert len(jit_events) == 1
+        details = jit_events[-1]["details"]
+        assert details["failures"][0]["entity_id"] == "device_tracker.phone"
+        assert "actual" not in str(details["failures"])
+
+    asyncio.run(run())
+
+
+def test_category_disclosure_reports_only_the_category():
+    async def run():
+        authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
+        restriction = {
+            **AWAY_RESTRICTION,
+            "params": {**AWAY_RESTRICTION["params"], "disclosure": {"level": "category"}},
+        }
+        await set_restrictions(store, grant, [restriction])
+
+        denied = await start_vacuum(authority)
+
+        assert denied["code"] == "jit_denied"
+        assert denied["jit"] == {"category": "condition_not_met"}
+        for leak in ("device_tracker.phone", "vacuum-only-when-away"):
+            assert leak not in denied["message"]
+            assert leak not in str(denied["jit"])
+
+    asyncio.run(run())
+
+
+def test_structured_field_toggles_hide_entity_expected_and_restriction_id():
+    async def run():
+        authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
+        restriction = structured(
+            AWAY_RESTRICTION,
+            fields={"restriction_id": False, "entity_id": False, "expected": False},
+        )
+        await set_restrictions(store, grant, [restriction])
+
+        denied = await start_vacuum(authority)
+
+        assert denied["code"] == "jit_denied"
+        assert "restriction_id" not in denied["jit"]
+        failure = denied["jit"]["failures"][0]
+        assert "entity_id" not in failure
+        assert "expected" not in failure
+        assert failure["operator"] == "is_not"
+        assert failure["reason"] == "condition_not_met"
+        # Hidden fields must not leak through the message either.
+        for leak in ("device_tracker.phone", "vacuum-only-when-away", "home"):
+            assert leak not in denied["message"]
+
+    asyncio.run(run())
+
+
+def test_diagnostic_grant_reveals_actual_until_it_expires():
+    async def run():
+        authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
+        diagnostic = {"entity_id": "device_tracker.phone", "fields": ["state"], "expires_at": "2999-01-01T00:00:00Z"}
+        restriction = structured(AWAY_RESTRICTION, fields={"actual": True}, diagnostics=[diagnostic])
+        await set_restrictions(store, grant, [restriction])
+
+        denied = await start_vacuum(authority)
+        failure = denied["jit"]["failures"][0]
+        assert failure["actual"] == "home"
+        assert "actual_redacted" not in failure
+        # The audit log still never stores the actual value.
+        audit = await store.async_audit_events()
+        details = [event for event in audit if event["event"] == "jit_denied"][-1]["details"]
+        assert "actual" not in str(details["failures"])
+
+        expired = structured(
+            AWAY_RESTRICTION,
+            fields={"actual": True},
+            diagnostics=[{**diagnostic, "expires_at": "2000-01-01T00:00:00Z"}],
+        )
+        await set_restrictions(store, grant, [expired])
+        denied = await start_vacuum(authority)
+        failure = denied["jit"]["failures"][0]
+        assert failure["actual"] is None
+        assert failure["actual_redacted"] is True
+
+    asyncio.run(run())
+
+
+def test_diagnostic_grant_is_limited_to_the_named_field():
+    async def run():
+        authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
+        hass.states.values["sensor.temperature"] = {
+            "entity_id": "sensor.temperature",
+            "state": "21",
+            "attributes": {"unit_of_measurement": "°C"},
+        }
+        base = {
+            "id": "unit-check",
+            "type": "jit",
+            "enabled": True,
+            "applies_to": "vacuum.start@vacuum.robot",
+            "params": {
+                "conditions": [
+                    {"entity_id": "sensor.temperature", "attribute": "unit_of_measurement", "operator": "is", "value": "°F"},
+                ],
+                "match": "all",
+            },
+        }
+        # A diagnostic grant for the state does NOT cover the attribute.
+        state_only = structured(
+            base,
+            fields={"actual": True},
+            diagnostics=[{"entity_id": "sensor.temperature", "fields": ["state"], "expires_at": "2999-01-01T00:00:00Z"}],
+        )
+        await set_restrictions(store, grant, [state_only])
+        denied = await start_vacuum(authority)
+        assert denied["jit"]["failures"][0]["actual"] is None
+
+        # Naming the attribute field covers it.
+        attribute_grant = structured(
+            base,
+            fields={"actual": True},
+            diagnostics=[{"entity_id": "sensor.temperature", "fields": ["unit_of_measurement"], "expires_at": "2999-01-01T00:00:00Z"}],
+        )
+        await set_restrictions(store, grant, [attribute_grant])
+        denied = await start_vacuum(authority)
+        assert denied["jit"]["failures"][0]["actual"] == "°C"
+
+    asyncio.run(run())
+
+
+def test_denial_rate_limit_flattens_responses():
+    async def run():
+        authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
+        restriction = structured(AWAY_RESTRICTION, denial_rate_limit={"limit": 2, "window_seconds": 3600})
+        await set_restrictions(store, grant, [restriction])
+
+        first = await start_vacuum(authority)
+        second = await start_vacuum(authority)
+        third = await start_vacuum(authority)
+
+        assert first["code"] == "jit_denied" and "failures" in first["jit"]
+        assert second["code"] == "jit_denied" and "failures" in second["jit"]
+        # Budget spent: the response flattens to a plain denial with no
+        # payload, indistinguishable from a scope denial.
+        assert third["code"] == "permission_denied"
+        assert "jit" not in third
+        assert third["message"] == "Permission denied"
+        # The owner still sees all three denials in the audit log, the
+        # third one flagged as rate-limited.
+        audit = await store.async_audit_events()
+        jit_events = [event for event in audit if event["event"] == "jit_denied"]
+        assert len(jit_events) == 3
+        assert jit_events[-1]["details"]["denial_rate_limited"] is True
+
+    asyncio.run(run())
+
+
+def test_audit_detail_is_independent_of_response_detail():
+    async def run():
+        authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
+        restriction = structured(AWAY_RESTRICTION)
+        restriction["params"]["disclosure"]["audit"] = {"level": "generic"}
+        await set_restrictions(store, grant, [restriction])
+
+        denied = await start_vacuum(authority)
+        assert denied["jit"]["failures"][0]["entity_id"] == "device_tracker.phone"
+
+        audit = await store.async_audit_events()
+        details = [event for event in audit if event["event"] == "jit_denied"][-1]["details"]
+        assert details == {"operation": "action"}
+
+    asyncio.run(run())
+
+
+def test_invalid_disclosure_config_falls_back_to_generic():
+    async def run():
+        authority, store, hass, grant = await paired_authority(VACUUM_MANIFEST)
+        restriction = {
+            **AWAY_RESTRICTION,
+            "params": {**AWAY_RESTRICTION["params"], "disclosure": {"level": "verbose"}},
+        }
+        await set_restrictions(store, grant, [restriction])
+
+        denied = await start_vacuum(authority)
+        assert denied["code"] == "jit_denied"
+        assert "jit" not in denied
+        assert denied["message"] == "Permission denied"
 
     asyncio.run(run())
