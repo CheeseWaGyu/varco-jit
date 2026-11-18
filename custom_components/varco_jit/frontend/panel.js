@@ -874,7 +874,7 @@ var VarcoPanel = class extends HTMLElement {
     if (type === "pin") return applies + `<label class="field">PIN <small class="muted">(set by you, never stored as plaintext)</small></label><input type="password" data-rf-pin placeholder="Enter PIN" autocomplete="new-password" style="max-width:280px">`;
     if (type === "rate_limit") return applies + `<div class="chk-row" style="margin-top:10px"><label class="field" style="margin:0">Max calls <input type="number" data-rf-limit min="1" value="10" style="width:80px"></label><label class="field" style="margin:0">per <input type="number" data-rf-window min="1" value="3600" style="width:90px"> seconds</label></div>`;
     if (type === "template") return applies + `<label class="field">Condition template <small class="muted">(Jinja2; falsy or error denies)</small></label><textarea data-rf-template rows="3" placeholder="{{ is_state('alarm_control_panel.home_alarm', 'disarmed') }}" style="${this.inputStyle};font-family:monospace"></textarea>`;
-    if (type === "jit") return applies + `<label class="field">Conditions <small class="muted">(JSON array; each: entity_id, optional attribute, operator, value, optional reveal_actual to override the checkbox below for that entity only. Operators: is, is_not, in, not_in, above, below, gte, lte, exists, not_exists)</small></label><textarea data-rf-jit-conditions rows="4" placeholder='[{"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home"}]' style="${this.inputStyle};font-family:monospace"></textarea><label class="field">Match</label><select data-rf-jit-match style="${this.inputStyle}"><option value="all">all conditions must pass</option><option value="any">any condition may pass</option></select><label class="field" style="margin-top:10px"><input type="checkbox" data-rf-jit-reveal> Reveal actual state values to the consumer on denial <small class="muted">(off: actuals are only sent for entities the grant can already read)</small></label>`;
+    if (type === "jit") return applies + `<label class="field">Conditions <small class="muted">(JSON array; each: entity_id, optional attribute, operator, value, optional reveal_actual: false hides that entity's actual value in denials (tightening only \u2014 it cannot reveal beyond read permission). Operators: is, is_not, in, not_in, above, below, gte, lte, exists, not_exists)</small></label><textarea data-rf-jit-conditions rows="4" placeholder='[{"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home"}]' style="${this.inputStyle};font-family:monospace"></textarea><label class="field">Match</label><select data-rf-jit-match style="${this.inputStyle}"><option value="all">all conditions must pass</option><option value="any">any condition may pass</option></select><label class="field">Denial detail sent to the consumer</label><select data-rf-jit-disclosure style="${this.inputStyle}"><option value="generic">generic \u2014 denial code and request id only</option><option value="category">category \u2014 broad denial category only</option><option value="structured">structured \u2014 per-condition failure detail (fields configurable in params.disclosure)</option></select><label class="field" style="margin-top:10px"><input type="checkbox" data-rf-jit-hide-actual> Hide actual state values in all denial responses <small class="muted">(tightening only; actuals are otherwise capped by read permission or a time-boxed diagnostic grant in params.diagnostics)</small></label>`;
     return "";
   }
   restrictionEditFields(r) {
@@ -891,7 +891,9 @@ var VarcoPanel = class extends HTMLElement {
     if (type === "template") return applies + `<label class="field">Condition template</label><textarea data-re-template rows="3" style="${this.inputStyle};font-family:monospace">${this.escape(String(params.value_template || ""))}</textarea>`;
     if (type === "jit" || type === "state_condition") {
       const conditionsJson = JSON.stringify(Array.isArray(params.conditions) ? params.conditions : [], null, 2);
-      return applies + `<label class="field">Conditions <small class="muted">(JSON array; a condition may set "reveal_actual": true/false to override the checkbox below for that entity only)</small></label><textarea data-re-jit-conditions rows="4" style="${this.inputStyle};font-family:monospace">${this.escape(conditionsJson)}</textarea><label class="field">Match</label><select data-re-jit-match style="${this.inputStyle}"><option value="all" ${params.match !== "any" ? "selected" : ""}>all conditions must pass</option><option value="any" ${params.match === "any" ? "selected" : ""}>any condition may pass</option></select><label class="field" style="margin-top:10px"><input type="checkbox" data-re-jit-reveal ${params.reveal_actual ? "checked" : ""}> Reveal actual state values to the consumer on denial</label>`;
+      const disclosure = params.disclosure && typeof params.disclosure === "object" ? params.disclosure : {};
+      const level = typeof disclosure.level === "string" ? disclosure.level : "generic";
+      return applies + `<label class="field">Conditions <small class="muted">(JSON array; a condition may set "reveal_actual": false to hide that entity's actual value in denials \u2014 tightening only)</small></label><textarea data-re-jit-conditions rows="4" style="${this.inputStyle};font-family:monospace">${this.escape(conditionsJson)}</textarea><label class="field">Match</label><select data-re-jit-match style="${this.inputStyle}"><option value="all" ${params.match !== "any" ? "selected" : ""}>all conditions must pass</option><option value="any" ${params.match === "any" ? "selected" : ""}>any condition may pass</option></select><label class="field">Denial detail sent to the consumer</label><select data-re-jit-disclosure style="${this.inputStyle}"><option value="generic" ${level === "generic" ? "selected" : ""}>generic \u2014 denial code and request id only</option><option value="category" ${level === "category" ? "selected" : ""}>category \u2014 broad denial category only</option><option value="structured" ${level === "structured" ? "selected" : ""}>structured \u2014 per-condition failure detail (fields configurable in params.disclosure)</option></select><label class="field" style="margin-top:10px"><input type="checkbox" data-re-jit-hide-actual ${params.reveal_actual === false ? "checked" : ""}> Hide actual state values in all denial responses <small class="muted">(tightening only)</small></label>`;
     }
     return applies;
   }
@@ -941,7 +943,10 @@ var VarcoPanel = class extends HTMLElement {
       }
       params.conditions = conditions;
       params.match = editEl.querySelector("[data-re-jit-match]")?.value || "all";
-      params.reveal_actual = !!editEl.querySelector("[data-re-jit-reveal]")?.checked;
+      const existingDisclosure = params.disclosure && typeof params.disclosure === "object" ? params.disclosure : {};
+      params.disclosure = { ...existingDisclosure, level: editEl.querySelector("[data-re-jit-disclosure]")?.value || "generic" };
+      if (editEl.querySelector("[data-re-jit-hide-actual]")?.checked) params.reveal_actual = false;
+      else delete params.reveal_actual;
     }
     return { ...original, applies_to: appliesTo, params };
   }
@@ -1001,8 +1006,11 @@ var VarcoPanel = class extends HTMLElement {
         return null;
       }
       const match = container.querySelector("[data-rf-jit-match]")?.value || "all";
-      const revealActual = !!container.querySelector("[data-rf-jit-reveal]")?.checked;
-      return { id, type, enabled: true, applies_to: appliesTo, params: { conditions, match, reveal_actual: revealActual } };
+      const level = container.querySelector("[data-rf-jit-disclosure]")?.value || "generic";
+      const hideActual = !!container.querySelector("[data-rf-jit-hide-actual]")?.checked;
+      const params = { conditions, match, disclosure: { level } };
+      if (hideActual) params.reveal_actual = false;
+      return { id, type, enabled: true, applies_to: appliesTo, params };
     }
     return null;
   }
