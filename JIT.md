@@ -13,8 +13,10 @@ A JIT restriction gates an operation on the *current state of other
 Home Assistant entities*, evaluated by the Authority at the moment the
 operation is attempted — immediately before the service call (or read,
 subscription, history query, or camera snapshot) is performed. If the
-conditions do not hold, the Authority denies the operation and returns
-a structured cause to the consumer.
+conditions do not hold, the Authority denies the operation; how much
+of the cause the consumer is told is governed by the restriction's
+disclosure policy, whose default (`generic`) reveals nothing beyond
+the denial code (see “Denial disclosure”).
 
 Example: a cleaning robot may only start while the owner's phone is
 not home.
@@ -45,7 +47,7 @@ Both gate operations on Home Assistant state, but:
 | | `template` | `jit` |
 | --- | --- | --- |
 | Condition form | Free-form Jinja2 string (`params.value_template`) | Structured data: a list of `{entity_id, attribute?, operator, value?}` conditions |
-| Denial reason | One generic reason (`template_denied`, `template_error`, `template_not_configured`) | Structured per-condition failures: entity, attribute, operator, expected value, failure reason, and (when allowed) the actual value |
+| Denial reason | One generic reason (`template_denied`, `template_error`, `template_not_configured`) | Disclosure-controlled: nothing beyond the code by default (`generic`), a broad category, or — at `structured` level — per-condition failures: entity, attribute, operator, expected value, failure reason, and (when the permission cap allows) the actual value |
 | Error code | `permission_denied` | `jit_denied`, with a machine-readable `jit` payload (see below) |
 | Expressiveness | Arbitrary Jinja (computed values, multiple entities in one expression) | Deliberately limited to single-entity comparisons that can be explained and audited |
 
@@ -67,7 +69,10 @@ such as `vacuum.start@vacuum.robot`).
 | --- | --- | --- | --- |
 | `conditions` | array of condition objects | — (required, non-empty) | The conditions to evaluate. |
 | `match` | `"all"` \| `"any"` | `"all"` | `all`: every condition must pass. `any`: at least one must pass. |
-| `reveal_actual` | boolean | `false` | Default for conditions without their own `reveal_actual`: allow actual state values in the consumer-facing denial for condition entities the grant cannot already read (see “Reveal rule”). |
+| `disclosure` | object | generic response / structured audit | What a denial tells the consumer and what it writes to the audit log, as two independent channels (see “Denial disclosure”). |
+| `diagnostics` | array of diagnostic grants | — | Time-boxed permission to disclose actual values beyond the grant's read permissions, per entity + field + expiry (see “Diagnostic grants”). |
+| `denial_rate_limit` | object `{limit, window_seconds}` | `{10, 60}` | Budget of detailed denials per window; once spent, responses flatten to a generic denial (see “Denial rate limiting”). |
+| `reveal_actual` | boolean | — (unset) | Tightening-only: `false` hides all actual values in denial responses. It never opens disclosure beyond the permission cap (see “Denial disclosure”). |
 
 Condition object:
 
@@ -77,7 +82,7 @@ Condition object:
 | `attribute` | string (optional) | Check this entry of the entity's `attributes` instead of its state. |
 | `operator` | string (required) | One of the operators below. |
 | `value` | any | Expected value. Required for every operator except `exists` / `not_exists`. For `in` / `not_in` it must be a list. |
-| `reveal_actual` | boolean (optional) | Per-condition override of the restriction-level `reveal_actual`. Wins in both directions: `true` reveals this entity's actual value even when the restriction default hides it, and `false` hides it even when the restriction default reveals it or the entity is readable under the grant. Omit it to inherit the restriction default. A non-boolean value is a configuration error (`invalid_condition`). |
+| `reveal_actual` | boolean (optional) | Tightening-only per-condition knob: `false` hides this entity's actual value in denial responses even when the permission cap would allow it. `true` is neutral — it cannot reveal beyond the cap (use a diagnostic grant for that). Omit it to inherit the restriction behaviour. A non-boolean value is a configuration error (`invalid_condition`). |
 
 Operators (symbol aliases in parentheses):
 
@@ -110,11 +115,17 @@ this order:
 
 ## The `jit_denied` error
 
-A JIT denial returns error code `jit_denied` (not the generic
-`permission_denied`), with a structured `jit` object. The `@varco/client`
-transports copy `payload.jit` onto the rejected `Error` object
-(`error.code === "jit_denied"`, `error.jit`), so agents receive the
-cause programmatically, not just as message text.
+What a JIT denial returns depends on the restriction's disclosure
+level (see “Denial disclosure”). At the default `generic` level the
+response is only the error code `jit_denied` and the request id, with
+the plain message `Permission denied` — no `jit` object at all. At
+`category` level the `jit` object carries a single broad `category`.
+The example below is the `structured` level: error code `jit_denied`
+(not the generic `permission_denied`) with a structured `jit` object.
+The `@varco/client` transports copy `payload.jit` onto the rejected
+`Error` object (`error.code === "jit_denied"`, `error.jit`) when one is
+present, so agents receive the cause programmatically, not just as
+message text.
 
 ```json
 {
@@ -159,30 +170,103 @@ Failure `reason` values:
   restrictions fail closed and the validation problems are also listed
   under `jit.errors` when available.
 
-## Reveal rule (privacy)
+## Denial disclosure
 
-The denial tells the consumer what was *expected*, but the *actual*
-state of a condition entity is sensitive: a JIT condition often
-references entities (presence trackers, alarm panels) that the consumer
-was deliberately not given read access to. Therefore:
+Disclosure — what a denial tells the consumer — is a policy of its
+own, configured per restriction under `params.disclosure`, and kept
+separate from the grant's read permissions:
 
-- `actual` is included in the consumer-facing payload and message only
-  when `reveal_actual` is `true` in the restriction params, **or** the
-  condition entity is already readable under the grant
-  (`entity_allowed` against the manifest's `read_entities`, wildcards
-  included).
-- A condition can override this per entity with its own
-  `reveal_actual`. An explicit per-condition value takes precedence in
-  both directions: `true` reveals that entity's actual even when the
-  restriction default is `false` and the grant cannot read it, and
-  `false` keeps that entity's actual hidden even when the restriction
-  default is `true` or the grant can already read it. This lets the
-  owner reveal, say, a temperature sensor's value while keeping a
-  presence tracker's value private inside the same restriction.
-- Otherwise `actual` is `null` and the failure carries
-  `"actual_redacted": true`.
-- The Home Assistant audit log **never** stores actual values,
-  regardless of the reveal rule (see below).
+```json
+"disclosure": {
+  "level": "generic",
+  "fields": {"entity_id": true, "expected": true, "actual": false},
+  "audit": {"level": "structured", "fields": {"expected": true}}
+}
+```
+
+### Response levels
+
+- `generic` (**default**): the response contains only the denial code
+  and the request id. No restriction id, entity id, expected or actual
+  values — in the payload *or* the human-readable `message`.
+- `category`: additionally, one broad category in `jit.category`:
+  `condition_not_met`, `state_unavailable`, or `configuration_error`.
+- `structured`: the full per-failure detail, subject to the field
+  toggles below.
+
+### Field toggles (structured)
+
+Under `structured`, each field is individually toggleable in
+`disclosure.fields`: `restriction_id`, `entity_id`, `attribute`,
+`operator`, `expected`, `reason`, `actual`. Defaults: all `true`
+except `actual` (`false`). Entity ids and expected values can be
+sensitive too, so they can be hidden like anything else. A hidden
+field is omitted from the payload and never appears in the `message`
+text either. A present but non-boolean toggle hides the field
+(fail-closed), and an unknown level falls back to `generic`.
+
+### Actual values are capped by permission
+
+An actual state value is disclosed only when **all** of these hold:
+
+1. the response level is `structured` and `fields.actual` is `true`;
+2. no tightening knob hides it (below); and
+3. the permission cap allows it: the condition entity is readable
+   under the grant (`entity_allowed` against the manifest's
+   `read_entities`, wildcards included), **or** a diagnostic grant
+   covers that entity and field (next section).
+
+Otherwise `actual` is `null` and the failure carries
+`"actual_redacted": true` (when the `actual` field itself is enabled).
+
+### Tightening-only reveal knobs
+
+`reveal_actual` — at restriction level and per condition — can only
+hide actual values, never open them beyond the cap:
+
+- Restriction-level `reveal_actual: false` hides every actual in the
+  restriction's denials. Any other non-`true` value behaves the same
+  (fail-closed).
+- Per-condition `reveal_actual: false` hides that condition's actual.
+- `reveal_actual: true` is neutral: it expresses “no extra hiding” and
+  has no opening effect on its own.
+
+*Migration note:* before this design, `reveal_actual: true` opened
+actuals beyond the read permissions. It no longer does; use a
+diagnostic grant for that. Existing `reveal_actual: false` settings
+keep working unchanged (they hide actuals, as before).
+
+### Diagnostic grants
+
+The one sanctioned way to disclose actuals beyond the grant's read
+permissions is an explicit, narrow, time-boxed diagnostic grant in
+`params.diagnostics`:
+
+```json
+"diagnostics": [
+  {"entity_id": "device_tracker.phone", "fields": ["state"],
+   "expires_at": "2026-11-25T00:00:00Z"}
+]
+```
+
+Each entry names one entity (patterns follow the usual entity scope
+syntax), the fields it covers (`"state"`, or an attribute name for
+attribute conditions), and a mandatory `expires_at` (ISO 8601 with a
+timezone). Expired, malformed, or field-mismatched entries never
+cover anything. Diagnostic grants affect denial responses only; they
+do not widen the grant's read permissions for normal reads.
+
+### Denial rate limiting
+
+Denials are themselves an oracle: each one confirms the protected
+condition still does not hold. Denials per (grant, restriction) are
+therefore budgeted — default **10 per 60 s**, configurable via
+`params.denial_rate_limit` (`{"limit": N, "window_seconds": S}`;
+malformed values fall back to the defaults, and the budget cannot be
+disabled, only widened). Once the budget is spent, denial responses
+flatten to a plain `permission_denied` / `Permission denied` with no
+payload until the window slides past. The audit log still records
+every denial, with `denial_rate_limited: true` on flattened ones.
 
 ## Audit and Home Assistant log behaviour
 
@@ -210,6 +294,16 @@ A JIT denial produces exactly one primary audit event, `jit_denied`
 context provides them. Per the repository invariant, audit details
 never contain entity states: failures are summarized as
 `{entity_id, attribute, operator, expected, reason}` with no `actual`.
+
+The audit channel is configured independently of the response channel
+via `disclosure.audit` (`level` + `fields`, same shape). Its default
+is the structured summary above; `category` records only
+`{operation, restriction_id, category}`, and `generic` records only
+`{operation}`. The `actual` audit field is forced off regardless of
+configuration. The Home Assistant `WARNING` log line is built from
+the audit details, so it follows the audit policy, not the response
+policy. Retention: the audit store keeps the most recent 1000 events
+(older events are dropped), with no per-event time-based expiry.
 
 The Authority also writes a `WARNING` line to the Home Assistant log
 with the same non-sensitive summary (restriction id, operation, failing
@@ -242,8 +336,13 @@ entity ids / operators / reasons).
 
 From the Varco JIT panel: open a grant card → **Restrictions** → choose
 **JIT state condition — allow only when entity states match**. The form
-takes the conditions as a JSON array, a `match` select, and a
-`reveal_actual` checkbox.
+takes the conditions as a JSON array, a `match` select, a denial-detail
+level select (`generic` / `category` / `structured`), and a
+hide-actual-values checkbox (which stores the tightening-only
+`reveal_actual: false`). Field-level disclosure toggles, diagnostic
+grants, the audit channel, and the denial rate limit are set in the
+restriction params (via the panel's stored JSON through
+`varco_jit/update_grant_restrictions` or at grant creation).
 
 Programmatically, restrictions are replaced through the admin
 WebSocket command `varco_jit/update_grant_restrictions` (the JIT
@@ -258,9 +357,15 @@ End-to-end vacuum example:
 2. The owner adds the `vacuum-only-when-away` restriction above via the
    panel or `varco_jit/update_grant_restrictions`.
 3. While the phone is `home`, the consumer's `call_service` is denied
-   with the `jit_denied` payload above; the vacuum never starts, no
-   rate-limit budget is consumed, and a `jit_denied` audit event is
-   recorded without the phone's state value.
+   with `jit_denied`; the vacuum never starts, no rate-limit budget is
+   consumed, and a `jit_denied` audit event is recorded without the
+   phone's state value. What the denial itself tells the consumer
+   follows the restriction's disclosure policy: with the example
+   restriction as written (no `disclosure` key) that is the `generic`
+   level — code and request id only. Adding
+   `"disclosure": {"level": "structured"}` produces the structured
+   payload shown above (with the phone's actual still redacted: the
+   grant cannot read it and no diagnostic grant covers it).
 4. When the phone leaves (`not_home`), the same call passes the JIT
    gate and the vacuum starts.
 
