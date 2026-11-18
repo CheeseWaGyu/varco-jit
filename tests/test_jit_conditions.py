@@ -200,6 +200,34 @@ def test_validate_conditions_reports_errors():
     assert validate_conditions("nope")
 
 
+def test_per_condition_reveal_actual_directive_is_carried_on_results():
+    decision = evaluate([
+        {"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home", "reveal_actual": True},
+        {"entity_id": "sensor.temperature", "operator": "above", "value": 30, "reveal_actual": False},
+        {"entity_id": "climate.living", "operator": "is", "value": "cool"},
+    ])
+    assert not decision.allowed
+    directives = {failure.entity_id: failure.reveal_actual for failure in decision.failures}
+    assert directives == {
+        "device_tracker.phone": True,
+        "sensor.temperature": False,
+        "climate.living": None,
+    }
+
+
+def test_non_boolean_reveal_actual_is_a_validation_error():
+    errors = validate_conditions({"conditions": [
+        {"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home", "reveal_actual": "yes"},
+    ]})
+    assert any("reveal_actual" in error for error in errors)
+    # ...and evaluation fails closed on it, like any malformed condition.
+    decision = evaluate([
+        {"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home", "reveal_actual": "yes"},
+    ])
+    assert not decision.allowed
+    assert decision.failures[0].reason == "invalid_condition"
+
+
 def test_audit_failure_drops_actual():
     decision = evaluate([{"entity_id": "device_tracker.phone", "operator": "is_not", "value": "home"}])
     summary = audit_failure(decision.failures[0])
