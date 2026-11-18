@@ -612,14 +612,20 @@ class VarcoAuthority:
     async def _jit_denied_error(self, grant: Grant, operation: str, context: dict[str, Any], message: dict[str, Any], restriction_id: str, params: dict[str, Any], decision: Any) -> dict[str, Any]:
         # Reveal rule for the consumer-facing payload: an actual state value
         # is included only when the owner opted in via reveal_actual, or the
-        # condition entity is already readable under this grant. The audit
-        # log never stores actual values, regardless of the reveal rule.
+        # condition entity is already readable under this grant. A condition
+        # may set its own reveal_actual, which wins in both directions over
+        # the restriction-level default and grant readability, so the owner
+        # chooses per entity what may be revealed. The audit log never
+        # stores actual values, regardless of the reveal rule.
         reveal_actual = params.get("reveal_actual") is True
         readable = read_entities(grant.manifest)
         failures_payload: list[dict[str, Any]] = []
         message_parts: list[str] = []
         for failure in decision.failures:
-            reveal = reveal_actual or (failure.entity_id is not None and entity_allowed(failure.entity_id, readable))
+            if failure.reveal_actual is not None:
+                reveal = failure.reveal_actual
+            else:
+                reveal = reveal_actual or (failure.entity_id is not None and entity_allowed(failure.entity_id, readable))
             entry = failure.as_dict(include_actual=False)
             if reveal:
                 entry["actual"] = failure.actual
