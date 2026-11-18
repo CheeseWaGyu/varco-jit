@@ -67,7 +67,7 @@ such as `vacuum.start@vacuum.robot`).
 | --- | --- | --- | --- |
 | `conditions` | array of condition objects | — (required, non-empty) | The conditions to evaluate. |
 | `match` | `"all"` \| `"any"` | `"all"` | `all`: every condition must pass. `any`: at least one must pass. |
-| `reveal_actual` | boolean | `false` | Allow actual state values in the consumer-facing denial for condition entities the grant cannot already read (see “Reveal rule”). |
+| `reveal_actual` | boolean | `false` | Default for conditions without their own `reveal_actual`: allow actual state values in the consumer-facing denial for condition entities the grant cannot already read (see “Reveal rule”). |
 
 Condition object:
 
@@ -77,6 +77,7 @@ Condition object:
 | `attribute` | string (optional) | Check this entry of the entity's `attributes` instead of its state. |
 | `operator` | string (required) | One of the operators below. |
 | `value` | any | Expected value. Required for every operator except `exists` / `not_exists`. For `in` / `not_in` it must be a list. |
+| `reveal_actual` | boolean (optional) | Per-condition override of the restriction-level `reveal_actual`. Wins in both directions: `true` reveals this entity's actual value even when the restriction default hides it, and `false` hides it even when the restriction default reveals it or the entity is readable under the grant. Omit it to inherit the restriction default. A non-boolean value is a configuration error (`invalid_condition`). |
 
 Operators (symbol aliases in parentheses):
 
@@ -170,6 +171,14 @@ was deliberately not given read access to. Therefore:
   condition entity is already readable under the grant
   (`entity_allowed` against the manifest's `read_entities`, wildcards
   included).
+- A condition can override this per entity with its own
+  `reveal_actual`. An explicit per-condition value takes precedence in
+  both directions: `true` reveals that entity's actual even when the
+  restriction default is `false` and the grant cannot read it, and
+  `false` keeps that entity's actual hidden even when the restriction
+  default is `true` or the grant can already read it. This lets the
+  owner reveal, say, a temperature sensor's value while keeping a
+  presence tracker's value private inside the same restriction.
 - Otherwise `actual` is `null` and the failure carries
   `"actual_redacted": true`.
 - The Home Assistant audit log **never** stores actual values,
